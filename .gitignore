@@ -1,0 +1,4 @@
+coffees.db
+__pycache__/
+*.pyc
+.ruff_cache/
