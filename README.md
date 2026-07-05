@@ -20,6 +20,7 @@ navigate the flavor space to find your next bag.
 - **Cluster** the catalog into flavor families with k-means and silhouette
   analysis
 - **Map** the entire flavor space onto a 2D UMAP visualization
+  ([interactive example](https://htmlpreview.github.io/?https://github.com/bsherrod/sip/blob/main/examples/flavor-map.html))
 - **Factor analysis** to reveal latent flavor themes and gaps in your
   exploration
 - **Archetype analysis** to identify extreme flavor styles and decompose coffees
