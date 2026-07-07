@@ -2,3 +2,5 @@ playwright>=1.40
 beautifulsoup4>=4.12
 lxml>=5.0
 requests>=2.31
+sentence-transformers>=2.2
+spacy>=3.7

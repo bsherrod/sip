@@ -11,6 +11,7 @@ import sqlite3
 import sys
 import time
 
+from embed import load_embeddings
 from scrape_sm import (
     ALL_COLS,
     CUPPING_COLS,
@@ -95,6 +96,26 @@ def _dscale():
 # --- Distance functions ---
 
 _DISTANCE_METRIC = "l2"
+_TEXT_WEIGHT = 0.0
+_EMBEDDINGS = None
+
+
+def _init_text_embeddings(conn):
+    """Load text embeddings if text weight is active."""
+    global _EMBEDDINGS
+    if _TEXT_WEIGHT <= 0:
+        return
+    _EMBEDDINGS = load_embeddings(conn)
+    if not _EMBEDDINGS:
+        logger.warning(
+            "text weight set but no embeddings found, run: python embed.py build"
+        )
+    else:
+        logger.info(
+            "loaded %d text embeddings (text_weight=%.2f)",
+            len(_EMBEDDINGS),
+            _TEXT_WEIGHT,
+        )
 
 
 def compute_dim_weights(all_vecs):
@@ -122,17 +143,22 @@ def compute_dim_stddevs(all_vecs):
 
 
 def make_distance_fn(all_vecs):
-    """Return a distance function based on the selected metric and the population vectors."""
+    """Return a distance function based on the selected metric and the population vectors.
+
+    The returned function has signature: distance(a, b, url_a=None, url_b=None).
+    When both URLs are provided, text embeddings are available, and _TEXT_WEIGHT > 0,
+    the function blends numeric distance with text cosine distance.
+    """
     metric = _DISTANCE_METRIC
 
     if metric == "l1":
 
-        def distance(a, b):
+        def numeric_distance(a, b):
             return sum(abs(x - y) for x, y in zip(a, b))
 
     elif metric == "cosine":
 
-        def distance(a, b):
+        def numeric_distance(a, b):
             dot = sum(x * y for x, y in zip(a, b))
             mag_a = sum(x * x for x in a) ** 0.5
             mag_b = sum(x * x for x in b) ** 0.5
@@ -148,15 +174,38 @@ def make_distance_fn(all_vecs):
         cov += np.eye(cov.shape[0]) * 1e-6
         cov_inv = np.linalg.inv(cov)
 
-        def distance(a, b):
+        def numeric_distance(a, b):
             diff = np.array(a) - np.array(b)
             return float(np.sqrt(diff @ cov_inv @ diff))
 
     else:  # l2 (default)
         weights = compute_dim_weights(all_vecs)
 
-        def distance(a, b):
+        def numeric_distance(a, b):
             return sum(w * (x - y) ** 2 for x, y, w in zip(a, b, weights)) ** 0.5
+
+    # Wrap with text blending
+    text_weight = _TEXT_WEIGHT
+    embeddings = _EMBEDDINGS
+
+    if text_weight <= 0 or not embeddings:
+
+        def distance(a, b, url_a=None, url_b=None):
+            return numeric_distance(a, b)
+
+    else:
+
+        def distance(a, b, url_a=None, url_b=None):
+            nd = numeric_distance(a, b)
+            if url_a is None or url_b is None:
+                return nd
+            emb_a = embeddings.get(url_a)
+            emb_b = embeddings.get(url_b)
+            if emb_a is None or emb_b is None:
+                return nd
+            # Cosine distance: embeddings are normalized, so 1 - dot = cosine dist
+            text_dist = 1.0 - float(emb_a @ emb_b)
+            return (1.0 - text_weight) * nd + text_weight * text_dist
 
     return distance
 
@@ -437,7 +486,7 @@ def recommend(no_decaf=False, exclude_urls=None, offline=False, top_n=3):
     tried_for_distance = [r for r in tried_rows if not _is_blend(r)]
     if not tried_for_distance:
         tried_for_distance = tried_rows
-    tried_vectors = [(to_vector(r), r["rating"]) for r in tried_for_distance]
+    tried_vectors = [(to_vector(r), r["rating"], r["url"]) for r in tried_for_distance]
     rating_weights = {"+": 0.5, "0": 1.0, "-": 2.0}
 
     # --- K-means clustering ---
@@ -642,8 +691,9 @@ def recommend(no_decaf=False, exclude_urls=None, offline=False, top_n=3):
     for coffee in untried:
         vec = to_vector(coffee)
         distances = []
-        for tvec, rating in tried_vectors:
-            d = weighted_distance(vec, tvec) * rating_weights.get(rating, 1.0)
+        for tvec, rating, turl in tried_vectors:
+            d = weighted_distance(vec, tvec, url_a=coffee["url"], url_b=turl)
+            d *= rating_weights.get(rating, 1.0)
             distances.append(d)
         min_dist = min(distances)
         min_idx = distances.index(min(distances))
@@ -917,7 +967,7 @@ def compare(query, no_decaf=False):
         if tr["url"] == target["url"]:
             continue
         tvec = to_vector(tr)
-        d = weighted_distance(target_vec, tvec)
+        d = weighted_distance(target_vec, tvec, url_a=target["url"], url_b=tr["url"])
         tried_dists.append((tr, d, tvec))
     tried_dists.sort(key=lambda x: x[1])
 
@@ -978,7 +1028,13 @@ def compare(query, no_decaf=False):
     ]
     if candidates:
         sim_scored = [
-            (c, weighted_distance(to_vector(c), target_vec)) for c in candidates
+            (
+                c,
+                weighted_distance(
+                    to_vector(c), target_vec, url_a=c["url"], url_b=target["url"]
+                ),
+            )
+            for c in candidates
         ]
         sim_scored.sort(key=lambda x: x[1])
 
@@ -1996,6 +2052,313 @@ def _write_map_html(html_path, png_filename, hotspots):
         f.write(content)
 
 
+# Flavor terms to ignore in keyword extraction (too generic for coffee context)
+_TEXT_STOPWORDS = frozenset(
+    [
+        "coffee",
+        "coffees",
+        "cup",
+        "cups",
+        "roast",
+        "roasts",
+        "roasting",
+        "roasted",
+        "notes",
+        "note",
+        "flavor",
+        "flavors",
+        "aroma",
+        "aromas",
+        "aromatic",
+        "aromatics",
+        "city",
+        "full",
+        "light",
+        "medium",
+        "dark",
+        "nice",
+        "good",
+        "great",
+        "sweet",
+        "sweetness",
+        "bit",
+        "hints",
+        "hint",
+        "like",
+        "also",
+        "well",
+        "really",
+        "quite",
+        "overall",
+        "makes",
+        "made",
+        "make",
+        "will",
+        "with",
+        "that",
+        "this",
+        "from",
+        "have",
+        "some",
+        "when",
+        "than",
+        "them",
+        "they",
+        "into",
+        "been",
+        "being",
+        "were",
+        "what",
+        "there",
+        "their",
+        "about",
+        "which",
+        "would",
+        "could",
+        "should",
+        "these",
+        "those",
+        "through",
+        "does",
+        "found",
+        "here",
+        "more",
+        "most",
+        "much",
+        "other",
+        "just",
+        "over",
+        "under",
+        "after",
+        "before",
+        "between",
+        "same",
+        "still",
+        "each",
+        "both",
+        "such",
+        "only",
+        "even",
+        "back",
+        "give",
+        "gives",
+        "come",
+        "comes",
+        "take",
+        "takes",
+        "keep",
+        "keeps",
+        "bring",
+        "brings",
+        "find",
+        "finds",
+        "show",
+        "shows",
+        "can",
+        "one",
+        "two",
+        "best",
+        "very",
+        "accents",
+        "accent",
+        "tones",
+        "tone",
+        "range",
+        "level",
+        "slight",
+        "slightly",
+        "subtle",
+        "strong",
+        "stronger",
+        "think",
+        "profile",
+        "profiles",
+        "picked",
+        "touch",
+        "though",
+        "little",
+        "first",
+        "second",
+        "third",
+        "think",
+        "things",
+        "thing",
+        "something",
+        "anything",
+        "nothing",
+        "everything",
+        "along",
+        "away",
+        "down",
+        "long",
+        "high",
+        "higher",
+        "lower",
+        "least",
+        "last",
+        "getting",
+        "going",
+        "want",
+        "need",
+        "much",
+        "many",
+        "while",
+        "where",
+        "across",
+        "pulled",
+        "around",
+    ]
+)
+
+
+def _extract_keywords(text, top_n=8):
+    """Extract distinctive flavor keywords from cupping notes text."""
+    import re
+
+    words = re.findall(r"[a-z]{4,}", text.lower())
+    # Filter out generic stopwords
+    words = [w for w in words if w not in _TEXT_STOPWORDS]
+    # Count frequencies
+    freq = {}
+    for w in words:
+        freq[w] = freq.get(w, 0) + 1
+    # Sort by frequency, take top N
+    ranked = sorted(freq.items(), key=lambda x: -x[1])
+    return [w for w, _ in ranked[:top_n]]
+
+
+def _add_text_keywords(archetype_names, alpha, rows, n_arch, conn):
+    """Enhance archetype names with distinctive noun phrases from purest members.
+
+    Uses spaCy to extract noun phrases from cupping notes, then scores by
+    lift (overrepresentation in archetype vs corpus) to find the most
+    distinctive flavor descriptors for each archetype.
+    """
+    import numpy as np
+    import spacy
+
+    conn.row_factory = sqlite3.Row
+
+    nlp = spacy.load("en_core_web_sm", disable=["ner", "lemmatizer"])
+
+    # Get cupping notes for all coffees
+    notes_by_url = {}
+    for row in conn.execute(
+        "SELECT url, cupping_notes FROM coffees WHERE cupping_notes IS NOT NULL"
+    ).fetchall():
+        notes_by_url[row["url"]] = row["cupping_notes"]
+
+    def _extract_phrases(text):
+        """Extract noun phrases from text via spaCy, lowercased and filtered."""
+        doc = nlp(text)
+        phrases = []
+        # Non-flavor terms to filter out of phrases
+        skip_words = {
+            "opinion",
+            "caffeine",
+            "content",
+            "works",
+            "roasts",
+            "roast",
+            "city",
+            "city+",
+            "temperature",
+            "batch",
+            "brewing",
+            "brewer",
+            "grinder",
+            "grounds",
+            "water",
+            "grams",
+            "minutes",
+            "seconds",
+            "degrees",
+            "ratio",
+            "recommendation",
+            "recommendations",
+        }
+        for chunk in doc.noun_chunks:
+            # Strip determiners and pronouns from the phrase
+            tokens = [t for t in chunk if t.pos_ not in ("DET", "PRON", "ADP")]
+            if not tokens:
+                continue
+            phrase = " ".join(t.text.lower() for t in tokens)
+            # Skip very short or very long phrases
+            if len(phrase) < 4 or len(phrase) > 30:
+                continue
+            # Skip phrases with numbers or special chars (brewing instructions)
+            if any(c.isdigit() or c in "()/+" for c in phrase):
+                continue
+            # Skip phrases containing non-flavor terms
+            words = phrase.split()
+            if any(w in skip_words for w in words):
+                continue
+            # Skip phrases that are entirely stopwords
+            if all(w in _TEXT_STOPWORDS for w in words):
+                continue
+            # Skip proper nouns (farm names, place names)
+            if all(t.pos_ == "PROPN" for t in tokens):
+                continue
+            phrases.append(phrase)
+        return phrases
+
+    # Compute corpus-wide phrase frequencies
+    all_phrases = []
+    for notes in notes_by_url.values():
+        all_phrases.extend(_extract_phrases(notes))
+    total_corpus = len(all_phrases)
+    corpus_freq = {}
+    for p in all_phrases:
+        corpus_freq[p] = corpus_freq.get(p, 0) + 1
+
+    enhanced_names = []
+    for ai in range(n_arch):
+        # Find top 5 purest members of this archetype
+        dominance = alpha[:, ai]
+        top_indices = np.argsort(dominance)[-5:][::-1]
+
+        # Collect cupping notes from purest members
+        arch_text = ""
+        for idx in top_indices:
+            url = rows[idx]["url"]
+            if url in notes_by_url:
+                arch_text += " " + notes_by_url[url]
+
+        if not arch_text.strip():
+            enhanced_names.append(archetype_names[ai])
+            continue
+
+        # Extract phrase frequencies for this archetype
+        arch_phrases = _extract_phrases(arch_text)
+        total_arch = len(arch_phrases)
+        arch_freq = {}
+        for p in arch_phrases:
+            arch_freq[p] = arch_freq.get(p, 0) + 1
+
+        # Score by lift, require minimum counts
+        distinctive = []
+        for phrase, count in arch_freq.items():
+            if count < 2:
+                continue
+            corpus_count = corpus_freq.get(phrase, 0)
+            if corpus_count < 2:
+                continue
+            arch_rate = count / total_arch
+            corpus_rate = corpus_count / total_corpus
+            lift = arch_rate / corpus_rate
+            distinctive.append((phrase, lift))
+
+        distinctive.sort(key=lambda x: -x[1])
+        top_phrases = [phrase for phrase, _ in distinctive[:3]]
+
+        if top_phrases:
+            enhanced_names.append(f"{archetype_names[ai]} ({', '.join(top_phrases)})")
+        else:
+            enhanced_names.append(archetype_names[ai])
+
+    return enhanced_names
+
+
 def flavor_map(
     no_decaf=False,
     exclude_urls=None,
@@ -2004,8 +2367,15 @@ def flavor_map(
     output_path="flavor-map.png",
     n_neighbors=10,
     min_dist=0.3,
+    text_mode="none",
 ):
-    """Generate a 2D UMAP flavor map as a PNG, colored by dominant archetype."""
+    """Generate a 2D UMAP flavor map as a PNG, colored by dominant archetype.
+
+    text_mode controls how text embeddings influence the layout:
+      - 'none': numeric PCA scores only (original behavior)
+      - 'blended': precomputed distance matrix blending numeric + text cosine
+      - 'concat': concatenate PCA-reduced text embeddings with numeric PCA scores
+    """
     import numpy as np
     import umap
     import matplotlib
@@ -2034,18 +2404,78 @@ def flavor_map(
     scores = np.array(pca["scores"])
     n_pca = pca["n_components"]
 
-    # Run archetypal analysis for coloring
-    n_arch, _ = _pick_n_archetypes(scores, seed=42)
-    aa = archetypal_analysis(scores, n_arch, max_iter=300)
+    # Load text embeddings if needed
+    embeddings_dict = None
+    if text_mode != "none":
+        embeddings_dict = load_embeddings(conn)
+        if not embeddings_dict:
+            logger.warning(
+                "text mode '%s' requested but no embeddings found, falling back to 'none'",
+                text_mode,
+            )
+            text_mode = "none"
+
+    # Build the space that drives UMAP and archetypal analysis
+    # For concat, also build text components here so archetypes use the same space
+    combined = None
+    n_text_components = 0
+    text_scores_scaled = None
+
+    if text_mode == "concat":
+        text_vecs = []
+        for row in rows:
+            emb = embeddings_dict.get(row["url"])
+            if emb is not None:
+                text_vecs.append(emb)
+            else:
+                text_vecs.append(np.zeros(384, dtype=np.float32))
+        text_matrix = np.array(text_vecs, dtype=np.float64)
+
+        # PCA reduce text embeddings
+        text_mean = text_matrix.mean(axis=0)
+        text_centered = text_matrix - text_mean
+        U, S, Vt = np.linalg.svd(text_centered, full_matrices=False)
+        text_var = (S**2) / (len(rows) - 1)
+        text_cumvar = np.cumsum(text_var / text_var.sum())
+        n_text_components = int(np.searchsorted(text_cumvar, 0.80) + 1)
+        n_text_components = max(3, min(n_text_components, 10))
+        text_scores = text_centered @ Vt[:n_text_components].T
+
+        # Normalize both to similar scale before concatenating
+        num_scale = np.std(scores)
+        text_scale = np.std(text_scores)
+        if text_scale > 0:
+            text_scores_scaled = text_scores * (num_scale / text_scale)
+        else:
+            text_scores_scaled = text_scores
+
+        combined = np.hstack([scores, text_scores_scaled])
+
+    # Determine the archetype space: match what UMAP will use
+    if text_mode == "concat":
+        arch_input = combined
+    else:
+        arch_input = scores
+
+    # Run archetypal analysis for coloring on the appropriate space
+    n_arch, _ = _pick_n_archetypes(arch_input, seed=42)
+    aa = archetypal_analysis(arch_input, n_arch, max_iter=300)
     alpha = np.array(aa["alpha"])
-    arch_scores = np.array(aa["archetypes"])
+    arch_coords = np.array(aa["archetypes"])  # in arch_input space
     components = np.array(pca["components"])
     mean_22d = np.array(pca["mean"])
 
-    # Name archetypes (same logic as archetypes command)
-    arch_22d = arch_scores @ components + mean_22d
+    # Name archetypes — project back to 22D for numeric labels
     ds = _dscale()
     stddevs = compute_dim_stddevs(vecs)
+
+    if text_mode == "concat":
+        # Archetype coords are in combined space: first n_pca dims are numeric PCA
+        arch_numeric_scores = arch_coords[:, :n_pca]
+    else:
+        arch_numeric_scores = arch_coords
+
+    arch_22d = arch_numeric_scores @ components + mean_22d
     archetype_names = []
     for ai in range(n_arch):
         arch_vec = arch_22d[ai]
@@ -2054,21 +2484,77 @@ def flavor_map(
         top_pos = [n for n, d in diffs if d > 0.3 * stddevs[0]][:2]
         archetype_names.append("/".join(top_pos) if top_pos else "Balanced")
 
-    # UMAP projection
-    logger.info(
-        "running UMAP: n_neighbors=%d, min_dist=%.2f, %dD PCA → 2D",
-        n_neighbors,
-        min_dist,
-        n_pca,
-    )
-    reducer = umap.UMAP(
-        n_neighbors=n_neighbors,
-        min_dist=min_dist,
-        n_components=2,
-        metric="euclidean",
-        random_state=42,
-    )
-    embedding = reducer.fit_transform(scores)
+    # Add text-derived keywords to archetype names when text is active
+    if text_mode != "none" and embeddings_dict:
+        archetype_names = _add_text_keywords(archetype_names, alpha, rows, n_arch, conn)
+
+    # UMAP projection — varies by text_mode
+    if text_mode == "blended":
+        text_weight = _TEXT_WEIGHT if _TEXT_WEIGHT > 0 else 0.3
+        logger.info(
+            "running UMAP (blended): n_neighbors=%d, min_dist=%.2f, text_weight=%.2f",
+            n_neighbors,
+            min_dist,
+            text_weight,
+        )
+        # Build pairwise distance matrix
+        n = len(rows)
+        dist_matrix = np.zeros((n, n))
+        for i in range(n):
+            for j in range(i + 1, n):
+                nd = float(np.linalg.norm(scores[i] - scores[j]))
+                emb_i = embeddings_dict.get(rows[i]["url"])
+                emb_j = embeddings_dict.get(rows[j]["url"])
+                if emb_i is not None and emb_j is not None:
+                    td = 1.0 - float(emb_i @ emb_j)
+                else:
+                    td = nd
+                blended = (1.0 - text_weight) * nd + text_weight * td
+                dist_matrix[i, j] = blended
+                dist_matrix[j, i] = blended
+
+        reducer = umap.UMAP(
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            n_components=2,
+            metric="precomputed",
+            random_state=42,
+        )
+        embedding = reducer.fit_transform(dist_matrix)
+        umap_desc = f"UMAP(blended, text_weight={text_weight:.1f})"
+
+    elif text_mode == "concat":
+        logger.info(
+            "running UMAP (concat): n_neighbors=%d, min_dist=%.2f, PCA+text → 2D",
+            n_neighbors,
+            min_dist,
+        )
+        reducer = umap.UMAP(
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            n_components=2,
+            metric="euclidean",
+            random_state=42,
+        )
+        embedding = reducer.fit_transform(combined)
+        umap_desc = f"UMAP(concat, {n_pca}D numeric + {n_text_components}D text → 2D)"
+
+    else:  # none
+        logger.info(
+            "running UMAP: n_neighbors=%d, min_dist=%.2f, %dD PCA → 2D",
+            n_neighbors,
+            min_dist,
+            n_pca,
+        )
+        reducer = umap.UMAP(
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            n_components=2,
+            metric="euclidean",
+            random_state=42,
+        )
+        embedding = reducer.fit_transform(scores)
+        umap_desc = f"UMAP({n_pca}D PCA → 2D)"
 
     # Classify each coffee
     tried_urls = set(r[0] for r in conn.execute("SELECT url FROM tried").fetchall())
@@ -2134,20 +2620,107 @@ def flavor_map(
         if row["url"] in tried_urls:
             labeled_indices.add(i)
 
-    # Label purest expression of each archetype (in-stock untried)
+    # Find archetype centers (purest expression) and contrasts, highlight them
+    arch_center_indices = []
+    arch_contrast_indices = []
+    avail_indices = [
+        i
+        for i, row in enumerate(rows)
+        if row["in_stock"] and row["url"] not in tried_urls
+    ]
+
     for ai in range(n_arch):
+        # Purest expression: highest alpha for this archetype (prefer in-stock untried)
         best_idx = None
         best_w = 0
-        for i, row in enumerate(rows):
-            if (
-                row["in_stock"]
-                and row["url"] not in tried_urls
-                and alpha[i, ai] > best_w
-            ):
+        for i in avail_indices:
+            if alpha[i, ai] > best_w:
                 best_w = alpha[i, ai]
                 best_idx = i
-        if best_idx is not None:
-            labeled_indices.add(best_idx)
+        if best_idx is None:
+            # Fall back to any coffee
+            best_idx = int(np.argmax(alpha[:, ai]))
+
+        arch_center_indices.append(best_idx)
+        labeled_indices.add(best_idx)
+
+        # Contrast: coffee farthest from this center in 2D embedding space
+        center_xy = embedding[best_idx]
+        contrast_idx = None
+        max_dist = -1
+        for i in avail_indices:
+            if i == best_idx:
+                continue
+            d = float(np.linalg.norm(embedding[i] - center_xy))
+            if d > max_dist:
+                max_dist = d
+                contrast_idx = i
+        arch_contrast_indices.append(contrast_idx)
+        if contrast_idx is not None:
+            labeled_indices.add(contrast_idx)
+
+    # Draw lines between center and contrast for each archetype
+    for ai in range(n_arch):
+        center_idx = arch_center_indices[ai]
+        contrast_idx = arch_contrast_indices[ai]
+        if contrast_idx is None:
+            continue
+        cx, cy = embedding[center_idx]
+        rx, ry = embedding[contrast_idx]
+        ax.plot(
+            [cx, rx],
+            [cy, ry],
+            color=colors[ai],
+            linewidth=1.2,
+            alpha=0.5,
+            linestyle="--",
+            zorder=8,
+        )
+
+    # Draw highlighted star markers on archetype centers
+    for ai in range(n_arch):
+        center_idx = arch_center_indices[ai]
+        cx, cy = embedding[center_idx]
+        # Outer glow
+        ax.scatter(
+            cx,
+            cy,
+            c=[colors[ai]],
+            marker="*",
+            s=400,
+            alpha=0.3,
+            zorder=11,
+            edgecolors="none",
+        )
+        # Star marker
+        ax.scatter(
+            cx,
+            cy,
+            c=[colors[ai]],
+            marker="*",
+            s=200,
+            zorder=12,
+            edgecolors="white",
+            linewidths=0.8,
+        )
+
+    # Draw diamond on contrast coffees
+    for ai in range(n_arch):
+        contrast_idx = arch_contrast_indices[ai]
+        if contrast_idx is None:
+            continue
+        rx, ry = embedding[contrast_idx]
+        ax.scatter(
+            rx,
+            ry,
+            c=[colors[ai]],
+            marker="D",
+            s=100,
+            zorder=11,
+            edgecolors="white",
+            linewidths=0.8,
+            alpha=0.8,
+        )
 
     for i in labeled_indices:
         x, y = embedding[i]
@@ -2242,6 +2815,43 @@ def flavor_map(
             linestyle="None",
         )
     )
+    legend_elements.append(
+        Line2D(
+            [0],
+            [0],
+            marker="*",
+            color="w",
+            markerfacecolor="gold",
+            markeredgecolor="white",
+            markersize=12,
+            label="Archetype center",
+            linestyle="None",
+        )
+    )
+    legend_elements.append(
+        Line2D(
+            [0],
+            [0],
+            marker="D",
+            color="w",
+            markerfacecolor="gray",
+            markeredgecolor="white",
+            markersize=8,
+            label="Contrast (farthest)",
+            linestyle="None",
+        )
+    )
+    legend_elements.append(
+        Line2D(
+            [0],
+            [0],
+            color="gray",
+            linewidth=1.2,
+            linestyle="--",
+            alpha=0.6,
+            label="Center ↔ Contrast",
+        )
+    )
 
     ax.legend(
         handles=legend_elements,
@@ -2254,8 +2864,7 @@ def flavor_map(
     )
 
     ax.set_title(
-        f"Coffee Flavor Map — {len(rows)} coffees, {n_arch} archetypes, "
-        f"UMAP({n_pca}D PCA → 2D)",
+        f"Coffee Flavor Map — {len(rows)} coffees, {n_arch} archetypes, {umap_desc}",
         color="white",
         fontsize=12,
         pad=15,
@@ -2303,8 +2912,9 @@ def flavor_map(
 
     print(f"\n  Saved: {output_path}")
     print(f"  Saved: {html_path}")
-    print(f"  {len(rows)} coffees, {n_arch} archetypes, {n_pca}D PCA → 2D UMAP")
+    print(f"  {len(rows)} coffees, {n_arch} archetypes, {umap_desc}")
     print(f"  UMAP params: n_neighbors={n_neighbors}, min_dist={min_dist}")
+    print(f"  Text mode: {text_mode}")
     print(f"  {len(hotspots)} clickable hotspots (in-stock, untried)")
 
     # Text summary: spatial observations
@@ -2385,6 +2995,14 @@ if __name__ == "__main__":
         default=0.80,
         metavar="FRAC",
         help="PCA variance threshold for auto-selecting components (default: %(default)s)",
+    )
+    common.add_argument(
+        "--text-weight",
+        type=float,
+        default=0.0,
+        metavar="W",
+        help="blend text embedding similarity into distance (0.0–1.0, default: %(default)s). "
+        "Requires embeddings: run 'python embed.py build' first.",
     )
 
     parser = argparse.ArgumentParser(
@@ -2492,6 +3110,16 @@ if __name__ == "__main__":
         action="store_true",
         help="only map currently in-stock coffees",
     )
+    p.add_argument(
+        "--text-mode",
+        choices=["none", "blended", "concat"],
+        default="none",
+        metavar="MODE",
+        help="how text embeddings influence layout: none (numeric only), "
+        "blended (precomputed hybrid distance), concat (concatenate reduced "
+        "text+numeric vectors). Requires embeddings: run 'python embed.py build' "
+        "first. (default: %(default)s)",
+    )
 
     # --- insights ---
     p = sub.add_parser(
@@ -2528,10 +3156,14 @@ if __name__ == "__main__":
 
     no_decaf = not args.decaf
     _DISTANCE_METRIC = args.distance
+    _TEXT_WEIGHT = args.text_weight
     use_zscore = not args.no_zscore
 
+    conn = sqlite3.connect(DB_PATH)
     if use_zscore:
-        init_zscore(sqlite3.connect(DB_PATH))
+        init_zscore(conn)
+    _init_text_embeddings(conn)
+    conn.close()
 
     if args.command == "recommend":
         recommend(
@@ -2569,6 +3201,7 @@ if __name__ == "__main__":
             output_path=args.output,
             n_neighbors=args.neighbors,
             min_dist=args.min_dist,
+            text_mode=args.text_mode,
         )
     elif args.command == "insights":
         insights(
