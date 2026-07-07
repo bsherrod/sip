@@ -19,8 +19,13 @@ navigate the flavor space to find your next bag.
   characteristics
 - **Cluster** the catalog into flavor families with k-means and silhouette
   analysis
-- **Map** the entire flavor space onto a 2D UMAP visualization
-  ([interactive example](https://htmlpreview.github.io/?https://github.com/bsherrod/sip/blob/main/examples/flavor-map.html))
+- **Map** the entire flavor space onto a 2D UMAP visualization with archetype
+  coloring, center/contrast markers, and interactive HTML hotspots
+  ([numeric](https://htmlpreview.github.io/?https://github.com/bsherrod/sip/blob/main/examples/flavor-map-numeric.html) ·
+  [blended](https://htmlpreview.github.io/?https://github.com/bsherrod/sip/blob/main/examples/flavor-map-blended.html) ·
+  [concat](https://htmlpreview.github.io/?https://github.com/bsherrod/sip/blob/main/examples/flavor-map-concat.html))
+- **Text embeddings** to incorporate cupping-note semantics into distance
+  calculations and map layout
 - **Factor analysis** to reveal latent flavor themes and gaps in your
   exploration
 - **Archetype analysis** to identify extreme flavor styles and decompose coffees
@@ -31,9 +36,13 @@ navigate the flavor space to find your next bag.
 ```bash
 # Install dependencies
 pip install -r requirements.txt
+python -m spacy download en_core_web_sm
 
 # Scrape the current catalog
 python scrape_sm.py
+
+# Build text embeddings (optional, enables --text-weight and --text-mode)
+python embed.py build
 
 # Get recommendations
 python coffee.py recommend
@@ -41,8 +50,10 @@ python coffee.py recommend
 # Compare a specific coffee
 python coffee.py compare "ethiopia natural"
 
-# Generate a flavor map
-python coffee.py map
+# Generate flavor maps
+python coffee.py map                          # numeric only
+python coffee.py map --text-mode blended      # hybrid distance matrix
+python coffee.py map --text-mode concat       # concatenated PCA vectors
 ```
 
 ## Commands
@@ -55,9 +66,27 @@ python coffee.py map
 | `coffee.py insights` | Outliers, clusters, superlatives |
 | `coffee.py factors` | PCA factor analysis of latent themes |
 | `coffee.py archetypes` | Extreme styles and mixture decomposition |
-| `coffee.py map` | 2D UMAP flavor map as PNG |
+| `coffee.py map` | 2D UMAP flavor map as PNG + interactive HTML |
+| `embed.py build` | Compute sentence embeddings for cupping notes |
+| `embed.py status` | Show embedding coverage |
 
 All commands support `--help` for detailed options.
+
+## Text embeddings
+
+The `embed.py` tool uses sentence-transformers (`all-MiniLM-L6-v2`) to encode
+each coffee's cupping notes into a 384-dimensional vector. These embeddings
+capture semantic flavor similarity beyond what numeric scores alone convey.
+
+Once built, embeddings unlock two features:
+
+- **`--text-weight W`** (global flag, 0.0–1.0) — blends text cosine similarity
+  into the distance function used by `recommend` and `compare`.
+- **`--text-mode MODE`** (for `map`) — controls how text influences the UMAP
+  layout:
+  - `none` — numeric PCA scores only (default, original behavior)
+  - `blended` — precomputed distance matrix mixing numeric L2 + text cosine
+  - `concat` — PCA-reduced text embeddings concatenated with numeric scores
 
 ## Database
 

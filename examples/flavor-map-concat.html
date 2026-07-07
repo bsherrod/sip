@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Coffee Flavor Map</title>
+<style>
+  body {
+    margin: 0;
+    background: #0f0f1a;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 20px;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+  .map-container {
+    position: relative;
+    display: inline-block;
+    max-width: 100%;
+    width: 1400px;
+  }
+  .map-container img {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+  .spot {
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    margin-left: -10px;
+    margin-top: -10px;
+    border-radius: 50%;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s, transform 0.15s;
+  }
+  .spot:hover {
+    opacity: 1;
+    background: rgba(255, 255, 255, 0.3);
+    box-shadow: 0 0 10px rgba(255, 255, 255, 0.6);
+    transform: scale(1.3);
+  }
+  .tooltip {
+    position: fixed;
+    background: #2a2a4a;
+    color: #fff;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s;
+    z-index: 1000;
+    max-width: 300px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    white-space: nowrap;
+  }
+  .tooltip .name {
+    font-weight: 600;
+    margin-bottom: 3px;
+  }
+  .tooltip .arch {
+    color: #aaa;
+    font-size: 11px;
+  }
+</style>
+</head>
+<body>
+<div class="map-container">
+  <img src="flavor-map-concat.png" alt="Coffee Flavor Map">
+    <a href="https://www.sweetmarias.com/products/brazil-cerrado-ana-maria-menezes-8604" target="_blank" class="spot" style="left:13.021%;top:89.061%" data-name="Brazil Cerrado Ana Maria Menezes" data-arch="Nuts/Caramel (bittering, balanced sweetness, dark chocolate)"></a>
+    <a href="https://www.sweetmarias.com/products/brazil-dry-process-felipe-goncalvez-8544" target="_blank" class="spot" style="left:21.518%;top:90.578%" data-name="Brazil Dry Process Felipe Gonçalvez" data-arch="Nuts/Caramel (bittering, balanced sweetness, dark chocolate)"></a>
+    <a href="https://www.sweetmarias.com/products/brazil-jacui-tulio-arantes-8606" target="_blank" class="spot" style="left:10.339%;top:83.317%" data-name="Brazil Jacuí Tulio Arantes" data-arch="Rustic/Body (unsweetened baking cocoa, bass notes, mild sweetness)"></a>
+    <a href="https://www.sweetmarias.com/products/brazil-machado-recanto-do-engenho-8608" target="_blank" class="spot" style="left:20.303%;top:45.166%" data-name="Brazil Machado Recanto do Engenho" data-arch="Caramel/Nuts (cooked fruit, vanilla, fragrance)"></a>
+    <a href="https://www.sweetmarias.com/products/ethiopia-uraga-haro-8533" target="_blank" class="spot" style="left:57.726%;top:54.358%" data-name="Ethiopia Uraga Haro" data-arch="Caramel/Nuts (cooked fruit, vanilla, fragrance)"></a>
+    <a href="https://www.sweetmarias.com/products/flores-dry-process-manggarai-colol-robusta-8569" target="_blank" class="spot" style="left:23.175%;top:12.757%" data-name="Flores Dry Process Manggarai Colol Robusta" data-arch="Rustic/Body (unsweetened baking cocoa, bass notes, mild sweetness)"></a>
+    <a href="https://www.sweetmarias.com/products/india-chikmagalur-gemberly-robusta-8616" target="_blank" class="spot" style="left:22.481%;top:18.266%" data-name="India Chikmagalur Gemberly Robusta" data-arch="Rustic/Body (unsweetened baking cocoa, bass notes, mild sweetness)"></a>
+    <a href="https://www.sweetmarias.com/products/india-pearl-mountain-estate-peaberry-8622" target="_blank" class="spot" style="left:25.718%;top:59.943%" data-name="India Pearl Mountain Estate Peaberry" data-arch="Caramel/Nuts (cooked fruit, vanilla, fragrance)"></a>
+    <a href="https://www.sweetmarias.com/products/java-anaerobic-honey-gambung-8561" target="_blank" class="spot" style="left:35.599%;top:52.266%" data-name="Java Anaerobic Honey Gambung" data-arch="Caramel/Nuts (cooked fruit, vanilla, fragrance)"></a>
+    <a href="https://www.sweetmarias.com/products/peru-comite-la-palma-8498" target="_blank" class="spot" style="left:38.276%;top:72.277%" data-name="Peru Comite La Palma" data-arch="Caramel/Nuts (cooked fruit, vanilla, fragrance)"></a>
+    <a href="https://www.sweetmarias.com/products/peru-productores-de-jaen-8502" target="_blank" class="spot" style="left:17.651%;top:69.171%" data-name="Peru Productores de Jaén" data-arch="Caramel/Nuts (cooked fruit, vanilla, fragrance)"></a>
+    <a href="https://www.sweetmarias.com/products/rwanda-nyamasheke-gatare-8577" target="_blank" class="spot" style="left:57.800%;top:61.004%" data-name="Rwanda Nyamasheke Gatare" data-arch="Caramel/Nuts (cooked fruit, vanilla, fragrance)"></a>
+    <a href="https://www.sweetmarias.com/products/rwanda-nyamasheke-mutovu-8576" target="_blank" class="spot" style="left:66.660%;top:45.965%" data-name="Rwanda Nyamasheke Mutovu" data-arch="Flavor/Finish (top notes, fruits, scent)"></a>
+    <a href="https://www.sweetmarias.com/products/rwanda-rulindo-tumba-2-8584" target="_blank" class="spot" style="left:64.344%;top:44.104%" data-name="Rwanda Rulindo Tumba 2" data-arch="Flavor/Finish (top notes, fruits, scent)"></a>
+    <a href="https://www.sweetmarias.com/products/rwanda-rusizi-gaseke-8514" target="_blank" class="spot" style="left:61.035%;top:62.615%" data-name="Rwanda Rusizi Gaseke" data-arch="Caramel/Nuts (cooked fruit, vanilla, fragrance)"></a>
+    <a href="https://www.sweetmarias.com/products/rwanda-rusizi-mushaka-8516" target="_blank" class="spot" style="left:71.928%;top:72.761%" data-name="Rwanda Rusizi Mushaka" data-arch="Honey/Floral (more subtle perfumed aromatics, star jasmine, orange blossom)"></a>
+    <a href="https://www.sweetmarias.com/products/tanzania-mbozi-songwe-aa-8623" target="_blank" class="spot" style="left:71.302%;top:62.539%" data-name="Tanzania Mbozi Songwe AA" data-arch="Flavor/Finish (top notes, fruits, scent)"></a>
+    <a href="https://www.sweetmarias.com/products/zambia-dry-process-kasama-misambo-8603" target="_blank" class="spot" style="left:31.816%;top:64.573%" data-name="Zambia Dry Process Kasama Misambo" data-arch="Caramel/Nuts (cooked fruit, vanilla, fragrance)"></a>
+    <a href="https://www.sweetmarias.com/products/brazil-pulp-natural-andreia-moreira-8539" target="_blank" class="spot" style="left:11.920%;top:71.917%" data-name="Brazil Pulp Natural Andréia Moreira" data-arch="Caramel/Nuts (cooked fruit, vanilla, fragrance)"></a>
+    <a href="https://www.sweetmarias.com/products/kenya-nyeri-gichathaini-aa-8629" target="_blank" class="spot" style="left:77.550%;top:69.895%" data-name="Kenya Nyeri Gichathaini AA" data-arch="Honey/Floral (more subtle perfumed aromatics, star jasmine, orange blossom)"></a>
+    <a href="https://www.sweetmarias.com/products/rwanda-dry-process-gitwe-8579" target="_blank" class="spot" style="left:55.398%;top:26.388%" data-name="Rwanda Dry Process Gitwe" data-arch="Berry/Fruits (cranberry sauce, potent aromatics, fruit)"></a>
+    <a href="https://www.sweetmarias.com/products/java-wet-hulled-sunda-rancabali-8560" target="_blank" class="spot" style="left:32.395%;top:19.583%" data-name="Java Sunda Wet Hulled Rancabali" data-arch="Rustic/Body (unsweetened baking cocoa, bass notes, mild sweetness)"></a>
+    <a href="https://www.sweetmarias.com/products/rwanda-milles-collines-peaberry-lot-2-8582" target="_blank" class="spot" style="left:75.337%;top:60.686%" data-name="Rwanda Milles Collines Peaberry Lot 2" data-arch="Flavor/Finish (top notes, fruits, scent)"></a>
+    <a href="https://www.sweetmarias.com/products/burundi-colline-rugembe-8660" target="_blank" class="spot" style="left:29.884%;top:74.401%" data-name="Burundi Colline Rugembe" data-arch="Flavor/Finish (top notes, fruits, scent)"></a>
+    <a href="https://www.sweetmarias.com/products/burundi-monge-murambi-hill-8659" target="_blank" class="spot" style="left:55.962%;top:54.859%" data-name="Burundi Monge Murambi Hill" data-arch="Caramel/Nuts (cooked fruit, vanilla, fragrance)"></a>
+    <a href="https://www.sweetmarias.com/products/kenya-kirinyaga-kiri-ab-8630" target="_blank" class="spot" style="left:75.723%;top:39.385%" data-name="Kenya Kirinyaga Kiri AB" data-arch="Flavor/Finish (top notes, fruits, scent)"></a>
+    <a href="https://www.sweetmarias.com/products/burundi-mutambu-migoti-hill-8657" target="_blank" class="spot" style="left:56.674%;top:62.134%" data-name="Burundi Mutambu Migoti Hill" data-arch="Honey/Floral (more subtle perfumed aromatics, star jasmine, orange blossom)"></a>
+    <a href="https://www.sweetmarias.com/products/sumatra-aged-lintong-5-year-vintage-8679" target="_blank" class="spot" style="left:25.076%;top:14.479%" data-name="Sumatra Aged Lintong - 5 Year Vintage" data-arch="Rustic/Body (unsweetened baking cocoa, bass notes, mild sweetness)"></a>
+    <a href="https://www.sweetmarias.com/products/burundi-dry-process-nyabiraba-kinama-8664" target="_blank" class="spot" style="left:51.870%;top:34.326%" data-name="Burundi Dry Process Nyabiraba Kinama" data-arch="Berry/Fruits (cranberry sauce, potent aromatics, fruit)"></a>
+    <a href="https://www.sweetmarias.com/products/burundi-colline-masenga-8658" target="_blank" class="spot" style="left:72.119%;top:70.078%" data-name="Burundi Colline Masenga" data-arch="Honey/Floral (more subtle perfumed aromatics, star jasmine, orange blossom)"></a>
+    <a href="https://www.sweetmarias.com/products/kenya-nyeri-ruarai-peaberry-8640" target="_blank" class="spot" style="left:85.408%;top:52.998%" data-name="Kenya Nyeri Ruarai Peaberry" data-arch="Honey/Floral (more subtle perfumed aromatics, star jasmine, orange blossom)"></a>
+    <a href="https://www.sweetmarias.com/products/kenya-nyeri-kiamabara-ab-8636" target="_blank" class="spot" style="left:55.654%;top:39.172%" data-name="Kenya Nyeri Kiamabara AB" data-arch="Berry/Fruits (cranberry sauce, potent aromatics, fruit)"></a>
+    <a href="https://www.sweetmarias.com/products/costa-rica-cafeteros-de-dota-8680" target="_blank" class="spot" style="left:11.442%;top:80.778%" data-name="Costa Rica Cafeteros de Dota" data-arch="Nuts/Caramel (bittering, balanced sweetness, dark chocolate)"></a>
+    <a href="https://www.sweetmarias.com/products/kenya-kiambu-spike-peaberry-8633" target="_blank" class="spot" style="left:56.511%;top:44.336%" data-name="Kenya Kiambu Spike Peaberry" data-arch="Berry/Fruits (cranberry sauce, potent aromatics, fruit)"></a>
+    <a href="https://www.sweetmarias.com/products/kenya-nyeri-gititu-ab-8637" target="_blank" class="spot" style="left:82.191%;top:48.862%" data-name="Kenya Nyeri Gititu AB" data-arch="Berry/Fruits (cranberry sauce, potent aromatics, fruit)"></a>
+    <a href="https://www.sweetmarias.com/products/kenya-nyeri-nduma-peaberry-8635" target="_blank" class="spot" style="left:74.615%;top:44.677%" data-name="Kenya Nyeri Nduma Peaberry" data-arch="Flavor/Finish (top notes, fruits, scent)"></a>
+    <a href="https://www.sweetmarias.com/products/kenya-nyeri-gathaithi-aa-8638" target="_blank" class="spot" style="left:56.723%;top:85.749%" data-name="Kenya Nyeri Gathaithi AA" data-arch="Berry/Fruits"></a>
+    <a href="https://www.sweetmarias.com/products/kenya-kiambu-spike-aa-8631" target="_blank" class="spot" style="left:55.662%;top:87.106%" data-name="Kenya Kiambu Spike AA" data-arch="Berry/Fruits"></a>
+    <a href="https://www.sweetmarias.com/products/el-salvador-dry-process-finca-san-luis-8668" target="_blank" class="spot" style="left:55.902%;top:88.996%" data-name="El Salvador Dry Process Finca San Luis" data-arch="Berry/Fruits"></a>
+    <a href="https://www.sweetmarias.com/products/mexico-organic-chiapas-el-paraiso-8700" target="_blank" class="spot" style="left:26.739%;top:81.254%" data-name="Mexico Organic Chiapas El Paraíso" data-arch="Caramel/Nuts (cooked fruit, vanilla, fragrance)"></a>
+    <a href="https://www.sweetmarias.com/products/el-salvador-san-miguel-bourbon-8675" target="_blank" class="spot" style="left:25.990%;top:84.749%" data-name="El Salvador San Miguel Bourbon" data-arch="Nuts/Caramel (bittering, balanced sweetness, dark chocolate)"></a>
+    <a href="https://www.sweetmarias.com/products/el-salvador-miravalles-pacamara-8673" target="_blank" class="spot" style="left:54.795%;top:87.696%" data-name="El Salvador Miravalles Pacamara" data-arch="Berry/Fruits"></a>
+</div>
+<div class="tooltip" id="tooltip"></div>
+<script>
+  const tooltip = document.getElementById('tooltip');
+  document.querySelectorAll('.spot').forEach(spot => {
+    spot.addEventListener('mouseenter', e => {
+      tooltip.innerHTML = '<div class="name">' + spot.dataset.name + '</div>'
+                        + '<div class="arch">' + spot.dataset.arch + '</div>';
+      tooltip.style.opacity = '1';
+    });
+    spot.addEventListener('mousemove', e => {
+      tooltip.style.left = (e.clientX + 14) + 'px';
+      tooltip.style.top = (e.clientY + 14) + 'px';
+    });
+    spot.addEventListener('mouseleave', () => {
+      tooltip.style.opacity = '0';
+    });
+  });
+</script>
+</body>
+</html>
