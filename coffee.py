@@ -2052,6 +2052,810 @@ def _write_map_html(html_path, png_filename, hotspots):
         f.write(content)
 
 
+def flavor_map_slider(
+    no_decaf=False,
+    exclude_urls=None,
+    available_only=False,
+    variance_threshold=0.80,
+    output_path="flavor-map-slider.html",
+    n_neighbors=10,
+    min_dist=0.3,
+    n_steps=11,
+):
+    """Generate an interactive HTML flavor map with a text-weight slider.
+
+    Pre-computes UMAP at n_steps evenly spaced text weights (0.0 to 1.0),
+    Procrustes-aligns all frames to the midpoint, then emits a self-contained
+    HTML file with SVG rendering and a slider that interpolates positions.
+
+    Archetypal analysis runs per frame on a blended feature space (numeric PCA
+    + text PCA scaled by the step's weight), so archetype count and assignment
+    evolve as text influence increases.
+    """
+    import json
+    import re
+
+    import numpy as np
+    import umap
+
+    conn = init_db()
+    conn.row_factory = sqlite3.Row
+    rows = get_scored_coffees(
+        conn,
+        no_decaf=no_decaf,
+        exclude_urls=exclude_urls,
+        available_only=available_only,
+    )
+
+    if len(rows) < 15:
+        print("Need at least 15 scored coffees for UMAP projection.")
+        conn.close()
+        return
+
+    # PCA reduction
+    vecs = [to_vector(r) for r in rows]
+    pca = pca_reduce(vecs, variance_threshold=variance_threshold)
+    scores = np.array(pca["scores"])
+    n_pca = pca["n_components"]
+    components = np.array(pca["components"])
+    mean_22d = np.array(pca["mean"])
+
+    # Load text embeddings (required for slider)
+    embeddings_dict = load_embeddings(conn)
+    if not embeddings_dict:
+        print("Slider map requires text embeddings. Run: python embed.py build")
+        conn.close()
+        return
+
+    # Build text PCA component (same approach as concat mode in flavor_map)
+    n = len(rows)
+    text_vecs = []
+    for row in rows:
+        emb = embeddings_dict.get(row["url"])
+        if emb is not None:
+            text_vecs.append(emb)
+        else:
+            text_vecs.append(np.zeros(384, dtype=np.float32))
+    text_matrix = np.array(text_vecs, dtype=np.float64)
+
+    text_mean = text_matrix.mean(axis=0)
+    text_centered = text_matrix - text_mean
+    U_t, S_t, Vt_t = np.linalg.svd(text_centered, full_matrices=False)
+    text_var = (S_t**2) / (n - 1)
+    text_cumvar = np.cumsum(text_var / text_var.sum())
+    n_text_components = int(np.searchsorted(text_cumvar, 0.80) + 1)
+    n_text_components = max(3, min(n_text_components, 10))
+    text_scores = text_centered @ Vt_t[:n_text_components].T
+
+    # Normalize text to match numeric variance scale
+    num_scale = np.std(scores)
+    text_scale = np.std(text_scores)
+    if text_scale > 0:
+        text_scores_scaled = text_scores * (num_scale / text_scale)
+    else:
+        text_scores_scaled = text_scores
+
+    # Pre-compute UMAP at each text weight step
+    weights = np.linspace(0.0, 1.0, n_steps)
+    frames = []
+
+    for step_i, tw in enumerate(weights):
+        logger.info(
+            "computing UMAP frame %d/%d (text_weight=%.2f)", step_i + 1, n_steps, tw
+        )
+        # Build blended distance matrix
+        dist_matrix = np.zeros((n, n))
+        for i in range(n):
+            for j in range(i + 1, n):
+                nd = float(np.linalg.norm(scores[i] - scores[j]))
+                emb_i = embeddings_dict.get(rows[i]["url"])
+                emb_j = embeddings_dict.get(rows[j]["url"])
+                if emb_i is not None and emb_j is not None:
+                    td = 1.0 - float(emb_i @ emb_j)
+                else:
+                    td = nd
+                blended = (1.0 - tw) * nd + tw * td
+                dist_matrix[i, j] = blended
+                dist_matrix[j, i] = blended
+
+        reducer = umap.UMAP(
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            n_components=2,
+            metric="precomputed",
+            random_state=42,
+        )
+        embedding = reducer.fit_transform(dist_matrix)
+        frames.append(embedding)
+
+    # Procrustes-align all frames to the midpoint frame
+    ref_idx = n_steps // 2
+    ref = frames[ref_idx].copy()
+
+    ref_centered = ref - ref.mean(axis=0)
+    ref_scale = np.sqrt((ref_centered**2).sum())
+    ref_norm = ref_centered / ref_scale
+
+    aligned_frames = []
+    for fi, frame in enumerate(frames):
+        if fi == ref_idx:
+            aligned_frames.append(ref_norm)
+            continue
+        target = frame - frame.mean(axis=0)
+        target_scale = np.sqrt((target**2).sum())
+        target_norm = target / target_scale
+
+        M = ref_norm.T @ target_norm
+        U, S, Vt = np.linalg.svd(M)
+        d = np.linalg.det(U @ Vt)
+        D = np.diag([1.0, 1.0 if d > 0 else -1.0])
+        R = U @ D @ Vt
+        aligned = target_norm @ R.T
+        aligned_frames.append(aligned)
+
+    # --- Per-frame archetypal analysis on blended feature space ---
+    ds = _dscale()
+    stddevs = compute_dim_stddevs(vecs)
+    avail_indices = [i for i, row in enumerate(rows) if row["in_stock"]]
+
+    # Get cupping notes for text keywords in archetype naming
+    notes_by_url = {}
+    for row in conn.execute(
+        "SELECT url, cupping_notes FROM coffees WHERE cupping_notes IS NOT NULL"
+    ).fetchall():
+        notes_by_url[row["url"]] = row["cupping_notes"]
+
+    tab10 = [
+        "#1f77b4",
+        "#ff7f0e",
+        "#2ca02c",
+        "#d62728",
+        "#9467bd",
+        "#8c564b",
+        "#e377c2",
+        "#7f7f7f",
+        "#bcbd22",
+        "#17becf",
+    ]
+
+    frame_archetypes = []
+    for step_i, tw in enumerate(weights):
+        logger.info(
+            "computing archetypes for frame %d/%d (text_weight=%.2f)",
+            step_i + 1,
+            n_steps,
+            tw,
+        )
+        # Blended feature space: numeric + text scaled by weight
+        if tw > 0:
+            arch_input = np.hstack([scores, text_scores_scaled * tw])
+        else:
+            arch_input = scores
+
+        n_arch, _ = _pick_n_archetypes(arch_input, seed=42)
+        aa = archetypal_analysis(arch_input, n_arch, max_iter=300)
+        alpha = np.array(aa["alpha"])
+        dominant = np.argmax(alpha, axis=1)
+        arch_coords = np.array(aa["archetypes"])
+
+        # Name archetypes from their numeric PCA component
+        arch_numeric = arch_coords[:, :n_pca]
+        arch_22d = arch_numeric @ components + mean_22d
+
+        names = []
+        for ai in range(n_arch):
+            arch_vec = arch_22d[ai]
+            diffs = [
+                (DIM_NAMES[j], (arch_vec[j] - mean_22d[j]) * ds[j]) for j in range(22)
+            ]
+            diffs.sort(key=lambda x: -abs(x[1]))
+            top_pos = [nm for nm, d in diffs if d > 0.3 * stddevs[0]][:2]
+            names.append("/".join(top_pos) if top_pos else "Balanced")
+
+        # Add text keywords to names when text has influence
+        if tw > 0:
+            names = _add_text_keywords(names, alpha, rows, n_arch, conn)
+
+        # Center indices (highest alpha among in-stock)
+        centers = []
+        for ai in range(n_arch):
+            best_idx = None
+            best_w = 0
+            for i in avail_indices:
+                if alpha[i, ai] > best_w:
+                    best_w = alpha[i, ai]
+                    best_idx = i
+            if best_idx is None:
+                best_idx = int(np.argmax(alpha[:, ai]))
+            centers.append(best_idx)
+
+        colors = [tab10[i % len(tab10)] for i in range(n_arch)]
+
+        frame_archetypes.append(
+            {
+                "n_arch": n_arch,
+                "archetypes": [
+                    {"name": names[i], "color": colors[i]} for i in range(n_arch)
+                ],
+                "dominant": [int(d) for d in dominant],
+                "centers": centers,
+            }
+        )
+
+    # Compute per-coffee numeric profile and text keywords
+    pop_means = [0.0] * 22
+    pop_stds = [0.0] * 22
+    for j in range(22):
+        vals = [v[j] for v in vecs]
+        pop_means[j] = sum(vals) / len(vals)
+        var = sum((x - pop_means[j]) ** 2 for x in vals) / len(vals)
+        pop_stds[j] = var**0.5 if var > 0 else 0.01
+
+    tried_urls = set(r[0] for r in conn.execute("SELECT url FROM tried").fetchall())
+    tried_ratings = dict(conn.execute("SELECT url, rating FROM tried").fetchall())
+    conn.close()
+
+    coffees_json = []
+    for i, row in enumerate(rows):
+        is_tried = row["url"] in tried_urls
+        rating = tried_ratings.get(row["url"], "0") if is_tried else None
+
+        vec = vecs[i]
+        z_scores = [
+            (DIM_NAMES[j], (vec[j] - pop_means[j]) / pop_stds[j]) for j in range(22)
+        ]
+        z_scores.sort(key=lambda x: -x[1])
+        numeric_profile = [nm for nm, z in z_scores[:3] if z > 0.3]
+        if not numeric_profile:
+            numeric_profile = [z_scores[0][0]]
+
+        notes = notes_by_url.get(row["url"], "")
+        text_keywords = []
+        if notes:
+            words = re.findall(r"[a-z]{4,}", notes.lower())
+            words = [w for w in words if w not in _TEXT_STOPWORDS]
+            freq = {}
+            for w in words:
+                freq[w] = freq.get(w, 0) + 1
+            ranked = sorted(freq.items(), key=lambda x: -x[1])
+            text_keywords = [w for w, _ in ranked[:5]]
+
+        coffees_json.append(
+            {
+                "name": row["name"],
+                "url": row["url"],
+                "in_stock": bool(row["in_stock"]),
+                "tried": is_tried,
+                "rating": rating,
+                "numeric": ", ".join(numeric_profile),
+                "text": ", ".join(text_keywords) if text_keywords else "",
+            }
+        )
+
+    # Build frames JSON
+    frames_json = []
+    for frame in aligned_frames:
+        frames_json.append([[round(float(x), 5), round(float(y), 5)] for x, y in frame])
+
+    data_json = json.dumps(
+        {
+            "steps": [round(float(w), 2) for w in weights],
+            "frames": frames_json,
+            "coffees": coffees_json,
+            "frame_archetypes": frame_archetypes,
+        },
+        separators=(",", ":"),
+    )
+
+    html_content = _slider_html_template(data_json)
+    with open(output_path, "w") as f:
+        f.write(html_content)
+
+    arch_counts = [fa["n_arch"] for fa in frame_archetypes]
+    print(f"\n  Saved: {output_path}")
+    print(f"  {n} coffees, {n_steps} weight steps")
+    print(f"  Archetypes per step: {arch_counts}")
+    print(f"  UMAP params: n_neighbors={n_neighbors}, min_dist={min_dist}")
+    print(f"  Procrustes-aligned to midpoint (weight={weights[ref_idx]:.1f})")
+    print()
+
+
+def _slider_html_template(data_json):
+    """Return the self-contained HTML string for the interactive slider map."""
+    return (
+        """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Coffee Flavor Map — Text Weight Slider</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #0f0f1a;
+  color: #eee;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100vh;
+  padding: 20px;
+}
+h1 {
+  font-size: 18px;
+  font-weight: 500;
+  margin-bottom: 12px;
+  color: #ccc;
+}
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 16px;
+  background: #1a1a2e;
+  padding: 12px 24px;
+  border-radius: 8px;
+  border: 1px solid #333;
+}
+.controls label {
+  font-size: 13px;
+  color: #aaa;
+}
+.controls input[type=range] {
+  width: 300px;
+  accent-color: #5b8def;
+}
+.controls .weight-val {
+  font-size: 15px;
+  font-weight: 600;
+  color: #5b8def;
+  min-width: 36px;
+  text-align: center;
+}
+.controls .endpoints {
+  font-size: 11px;
+  color: #888;
+}
+.info-bar {
+  font-size: 12px;
+  color: #aaa;
+  margin-bottom: 8px;
+}
+.info-bar span { color: #5b8def; font-weight: 600; }
+.map-wrap {
+  position: relative;
+  width: 900px;
+  height: 700px;
+  background: #1a1a2e;
+  border-radius: 8px;
+  border: 1px solid #333;
+  overflow: hidden;
+}
+svg {
+  width: 100%;
+  height: 100%;
+}
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 10px 16px;
+  background: #1a1a2e;
+  border-radius: 8px;
+  border: 1px solid #333;
+  max-width: 900px;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #ccc;
+}
+.legend-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.tooltip {
+  position: fixed;
+  background: #2a2a4a;
+  color: #fff;
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s;
+  z-index: 1000;
+  max-width: 320px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.6);
+  line-height: 1.4;
+}
+.tooltip .tt-name { font-weight: 600; margin-bottom: 4px; font-size: 13px; }
+.tooltip .tt-desc { margin-bottom: 3px; }
+.tooltip .tt-desc .label { color: #aaa; font-size: 10px; text-transform: uppercase; }
+.tooltip .tt-desc .value { color: #ddd; }
+.tooltip .tt-arch { color: #aaa; font-size: 11px; margin-bottom: 2px; }
+.tooltip .tt-status { color: #8f8; font-size: 11px; margin-top: 4px; }
+</style>
+</head>
+<body>
+<h1>Coffee Flavor Map — Text Weight Explorer</h1>
+<div class="controls">
+  <span class="endpoints">Numeric only</span>
+  <label>Text Weight:</label>
+  <input type="range" id="slider" min="0" max="1" step="0.01" value="0.00">
+  <span class="weight-val" id="weight-display">0.00</span>
+  <span class="endpoints">Text only</span>
+</div>
+<div class="info-bar" id="info-bar">Archetypes: <span id="arch-count">\u2014</span></div>
+<div class="map-wrap">
+  <svg id="map" xmlns="http://www.w3.org/2000/svg"></svg>
+</div>
+<div class="legend" id="legend"></div>
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+const DATA = """
+        + data_json
+        + """;
+
+const svg = document.getElementById('map');
+const slider = document.getElementById('slider');
+const weightDisplay = document.getElementById('weight-display');
+const tooltip = document.getElementById('tooltip');
+const legendEl = document.getElementById('legend');
+const archCountEl = document.getElementById('arch-count');
+
+const { steps, frames, coffees, frame_archetypes } = DATA;
+const N = coffees.length;
+const nSteps = steps.length;
+const maxArch = Math.max(...frame_archetypes.map(fa => fa.n_arch));
+let currentWeight = 0.0;
+let currentFrameIdx = -1;
+
+// Track current interpolated positions
+const positions = new Array(N);
+for (let i = 0; i < N; i++) positions[i] = [0, 0];
+
+// Compute global bounds across all frames for stable viewport
+let gMinX = Infinity, gMaxX = -Infinity, gMinY = Infinity, gMaxY = -Infinity;
+for (const frame of frames) {
+  for (const [x, y] of frame) {
+    if (x < gMinX) gMinX = x;
+    if (x > gMaxX) gMaxX = x;
+    if (y < gMinY) gMinY = y;
+    if (y > gMaxY) gMaxY = y;
+  }
+}
+const pad = 0.08;
+const rangeX = gMaxX - gMinX || 1;
+const rangeY = gMaxY - gMinY || 1;
+gMinX -= rangeX * pad;
+gMaxX += rangeX * pad;
+gMinY -= rangeY * pad;
+gMaxY += rangeY * pad;
+
+const W = 900, H = 700;
+
+function toSVG(x, y) {
+  const sx = ((x - gMinX) / (gMaxX - gMinX)) * W;
+  const sy = H - ((y - gMinY) / (gMaxY - gMinY)) * H;
+  return [sx, sy];
+}
+
+// --- SVG layer groups for z-ordering ---
+const lineGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+const circleGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+const markerGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+svg.appendChild(lineGroup);
+svg.appendChild(circleGroup);
+svg.appendChild(markerGroup);
+
+// Dashed lines for center-contrast pairs (up to maxArch)
+const contrastLines = [];
+for (let ai = 0; ai < maxArch; ai++) {
+  const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  line.setAttribute('stroke-width', '1.5');
+  line.setAttribute('stroke-dasharray', '6,4');
+  line.setAttribute('opacity', '0');
+  lineGroup.appendChild(line);
+  contrastLines.push(line);
+}
+
+// Coffee circles
+const circles = [];
+for (let i = 0; i < N; i++) {
+  const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  const coffee = coffees[i];
+
+  let r, baseOpacity, strokeW, stroke;
+  if (coffee.tried) {
+    r = 6; baseOpacity = 1.0; strokeW = 1.5; stroke = '#fff';
+  } else if (coffee.in_stock) {
+    r = 4.5; baseOpacity = 0.85; strokeW = 0; stroke = 'none';
+  } else {
+    r = 3; baseOpacity = 0.3; strokeW = 0; stroke = 'none';
+  }
+
+  c.setAttribute('r', r);
+  c.setAttribute('opacity', baseOpacity);
+  c.setAttribute('stroke', stroke);
+  c.setAttribute('stroke-width', strokeW);
+  c.style.cursor = coffee.in_stock || coffee.tried ? 'pointer' : 'default';
+  c.dataset.idx = i;
+  c.dataset.baseOpacity = baseOpacity;
+  circleGroup.appendChild(c);
+  circles.push(c);
+}
+
+// Tried coffees: shape indicators
+const triedMarkers = [];
+for (let i = 0; i < N; i++) {
+  const coffee = coffees[i];
+  if (!coffee.tried) continue;
+  const marker = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  const sym = coffee.rating === '+' ? '\\u25b2' : coffee.rating === '-' ? '\\u25bc' : '\\u25a0';
+  marker.textContent = sym;
+  marker.setAttribute('font-size', '8');
+  marker.setAttribute('fill', '#fff');
+  marker.setAttribute('text-anchor', 'middle');
+  marker.setAttribute('dominant-baseline', 'central');
+  marker.setAttribute('pointer-events', 'none');
+  markerGroup.appendChild(marker);
+  triedMarkers.push({ el: marker, idx: i });
+}
+
+// Center star markers (up to maxArch, hide unused)
+const centerStars = [];
+for (let ai = 0; ai < maxArch; ai++) {
+  const star = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  star.textContent = '\\u2605';
+  star.setAttribute('font-size', '18');
+  star.setAttribute('stroke', '#fff');
+  star.setAttribute('stroke-width', '0.5');
+  star.setAttribute('text-anchor', 'middle');
+  star.setAttribute('dominant-baseline', 'central');
+  star.setAttribute('pointer-events', 'none');
+  star.setAttribute('opacity', '0');
+  markerGroup.appendChild(star);
+  centerStars.push(star);
+}
+
+// Contrast diamond markers (up to maxArch)
+const contrastDiamonds = [];
+for (let ai = 0; ai < maxArch; ai++) {
+  const diamond = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+  diamond.textContent = '\\u25c6';
+  diamond.setAttribute('font-size', '14');
+  diamond.setAttribute('stroke', '#fff');
+  diamond.setAttribute('stroke-width', '0.4');
+  diamond.setAttribute('text-anchor', 'middle');
+  diamond.setAttribute('dominant-baseline', 'central');
+  diamond.setAttribute('pointer-events', 'none');
+  diamond.setAttribute('opacity', '0');
+  markerGroup.appendChild(diamond);
+  contrastDiamonds.push(diamond);
+}
+
+// Find contrast for each archetype: farthest in-stock point from center
+function findContrasts(fa) {
+  const contrasts = [];
+  for (let ai = 0; ai < fa.n_arch; ai++) {
+    const ci = fa.centers[ai];
+    const cx = positions[ci][0];
+    const cy = positions[ci][1];
+    let maxDist = -1;
+    let contrastIdx = -1;
+    for (let i = 0; i < N; i++) {
+      if (i === ci) continue;
+      if (!coffees[i].in_stock) continue;
+      const dx = positions[i][0] - cx;
+      const dy = positions[i][1] - cy;
+      const d = dx * dx + dy * dy;
+      if (d > maxDist) { maxDist = d; contrastIdx = i; }
+    }
+    contrasts.push(contrastIdx);
+  }
+  return contrasts;
+}
+
+// Apply archetype coloring for a given frame
+function applyArchetypeColors(frameIdx) {
+  if (frameIdx === currentFrameIdx) return;
+  currentFrameIdx = frameIdx;
+  const fa = frame_archetypes[frameIdx];
+
+  // Update circle colors
+  for (let i = 0; i < N; i++) {
+    const archIdx = fa.dominant[i];
+    const color = fa.archetypes[archIdx].color;
+    circles[i].setAttribute('fill', color);
+  }
+
+  // Update legend
+  rebuildLegend(fa);
+
+  // Update arch count display
+  archCountEl.textContent = fa.n_arch;
+}
+
+function rebuildLegend(fa) {
+  legendEl.innerHTML = '';
+  for (const arch of fa.archetypes) {
+    const item = document.createElement('div');
+    item.className = 'legend-item';
+    item.innerHTML = '<div class="legend-swatch" style="background:' + arch.color + '"></div>' + arch.name;
+    legendEl.appendChild(item);
+  }
+  const statusItems = [
+    { label: '\\u2605 Archetype center', text: '\\u2605' },
+    { label: '\\u25c6 Contrast (farthest)', text: '\\u25c6' },
+    { label: 'Tried (outlined)', swatch: 'border: 2px solid #fff; width: 10px; height: 10px;' },
+    { label: 'In stock', swatch: 'background: #888; width: 9px; height: 9px;' },
+    { label: 'Out of stock', swatch: 'background: #888; opacity: 0.3; width: 7px; height: 7px;' }
+  ];
+  for (const si of statusItems) {
+    const item = document.createElement('div');
+    item.className = 'legend-item';
+    if (si.text) {
+      item.innerHTML = '<span style="font-size:14px">' + si.text + '</span> ' + si.label;
+    } else {
+      item.innerHTML = '<div class="legend-swatch" style="' + si.swatch + '"></div>' + si.label;
+    }
+    legendEl.appendChild(item);
+  }
+}
+
+function interpolate(weight) {
+  currentWeight = weight;
+
+  // Find bracketing frames
+  let lo = 0, hi = nSteps - 1;
+  for (let i = 0; i < nSteps - 1; i++) {
+    if (steps[i + 1] >= weight) { lo = i; hi = i + 1; break; }
+  }
+  if (weight <= steps[0]) { lo = 0; hi = 0; }
+  if (weight >= steps[nSteps - 1]) { lo = nSteps - 1; hi = nSteps - 1; }
+
+  const t = (lo === hi) ? 0 : (weight - steps[lo]) / (steps[hi] - steps[lo]);
+  const frameA = frames[lo];
+  const frameB = frames[hi];
+
+  // Snap archetype coloring to nearest frame
+  const nearestFrame = (t <= 0.5) ? lo : hi;
+  applyArchetypeColors(nearestFrame);
+  const fa = frame_archetypes[nearestFrame];
+
+  // Update positions and circles
+  for (let i = 0; i < N; i++) {
+    const x = frameA[i][0] * (1 - t) + frameB[i][0] * t;
+    const y = frameA[i][1] * (1 - t) + frameB[i][1] * t;
+    positions[i][0] = x;
+    positions[i][1] = y;
+    const [sx, sy] = toSVG(x, y);
+    circles[i].setAttribute('cx', sx);
+    circles[i].setAttribute('cy', sy);
+  }
+
+  // Update tried markers
+  for (const { el, idx } of triedMarkers) {
+    const [sx, sy] = toSVG(positions[idx][0], positions[idx][1]);
+    el.setAttribute('x', sx);
+    el.setAttribute('y', sy);
+  }
+
+  // Update center stars and contrasts for current archetype set
+  const contrasts = findContrasts(fa);
+  for (let ai = 0; ai < maxArch; ai++) {
+    if (ai < fa.n_arch) {
+      const ci = fa.centers[ai];
+      const color = fa.archetypes[ai].color;
+      const [csx, csy] = toSVG(positions[ci][0], positions[ci][1]);
+
+      centerStars[ai].setAttribute('x', csx);
+      centerStars[ai].setAttribute('y', csy);
+      centerStars[ai].setAttribute('fill', color);
+      centerStars[ai].setAttribute('opacity', '1');
+
+      const ri = contrasts[ai];
+      if (ri >= 0) {
+        const [rsx, rsy] = toSVG(positions[ri][0], positions[ri][1]);
+        contrastDiamonds[ai].setAttribute('x', rsx);
+        contrastDiamonds[ai].setAttribute('y', rsy);
+        contrastDiamonds[ai].setAttribute('fill', color);
+        contrastDiamonds[ai].setAttribute('opacity', '1');
+        contrastLines[ai].setAttribute('x1', csx);
+        contrastLines[ai].setAttribute('y1', csy);
+        contrastLines[ai].setAttribute('x2', rsx);
+        contrastLines[ai].setAttribute('y2', rsy);
+        contrastLines[ai].setAttribute('stroke', color);
+        contrastLines[ai].setAttribute('opacity', '0.6');
+      } else {
+        contrastDiamonds[ai].setAttribute('opacity', '0');
+        contrastLines[ai].setAttribute('opacity', '0');
+      }
+    } else {
+      // Hide unused archetype markers
+      centerStars[ai].setAttribute('opacity', '0');
+      contrastDiamonds[ai].setAttribute('opacity', '0');
+      contrastLines[ai].setAttribute('opacity', '0');
+    }
+  }
+}
+
+// Slider event
+slider.addEventListener('input', () => {
+  const w = parseFloat(slider.value);
+  weightDisplay.textContent = w.toFixed(2);
+  interpolate(w);
+});
+
+// Tooltip with blended numeric/text descriptions
+svg.addEventListener('mousemove', (e) => {
+  const target = e.target;
+  if (target.tagName === 'circle' && target.dataset.idx !== undefined) {
+    const idx = parseInt(target.dataset.idx);
+    const coffee = coffees[idx];
+    const fa = frame_archetypes[currentFrameIdx];
+    const archIdx = fa.dominant[idx];
+    const arch = fa.archetypes[archIdx];
+    const w = currentWeight;
+
+    // Blend opacity: numeric fades out, text fades in
+    const numOpacity = Math.max(0.3, 1.0 - w * 0.7);
+    const txtOpacity = Math.max(0.3, w * 0.7 + 0.3);
+
+    let descHtml = '';
+    if (coffee.numeric) {
+      descHtml += '<div class="tt-desc" style="opacity:' + numOpacity.toFixed(2) + '">'
+        + '<span class="label">Cupping: </span>'
+        + '<span class="value">' + coffee.numeric + '</span></div>';
+    }
+    if (coffee.text) {
+      descHtml += '<div class="tt-desc" style="opacity:' + txtOpacity.toFixed(2) + '">'
+        + '<span class="label">Notes: </span>'
+        + '<span class="value">' + coffee.text + '</span></div>';
+    }
+
+    let status = coffee.tried ? 'Tried' : (coffee.in_stock ? 'In stock' : 'Out of stock');
+    if (coffee.tried && coffee.rating) {
+      const r = {'+': ' (liked)', '0': ' (neutral)', '-': ' (disliked)'}[coffee.rating] || '';
+      status += r;
+    }
+
+    tooltip.innerHTML = '<div class="tt-name">' + coffee.name + '</div>'
+      + '<div class="tt-arch">' + arch.name + '</div>'
+      + descHtml
+      + '<div class="tt-status">' + status + '</div>';
+    tooltip.style.opacity = '1';
+    tooltip.style.left = (e.clientX + 14) + 'px';
+    tooltip.style.top = (e.clientY + 14) + 'px';
+  } else {
+    tooltip.style.opacity = '0';
+  }
+});
+
+svg.addEventListener('mouseleave', () => { tooltip.style.opacity = '0'; });
+
+// Click to open URL
+svg.addEventListener('click', (e) => {
+  if (e.target.tagName === 'circle' && e.target.dataset.idx !== undefined) {
+    const coffee = coffees[parseInt(e.target.dataset.idx)];
+    if (coffee.url) window.open(coffee.url, '_blank');
+  }
+});
+
+// Initial render
+interpolate(0.0);
+</script>
+</body>
+</html>"""
+    )
+
+
 # Flavor terms to ignore in keyword extraction (too generic for coffee context)
 _TEXT_STOPWORDS = frozenset(
     [
@@ -3120,6 +3924,20 @@ if __name__ == "__main__":
         "text+numeric vectors). Requires embeddings: run 'python embed.py build' "
         "first. (default: %(default)s)",
     )
+    p.add_argument(
+        "--slider",
+        action="store_true",
+        help="generate interactive HTML with text-weight slider (0→1). "
+        "Pre-computes UMAP at multiple steps with Procrustes alignment. "
+        "Requires embeddings: run 'python embed.py build' first.",
+    )
+    p.add_argument(
+        "--slider-steps",
+        type=int,
+        default=11,
+        metavar="N",
+        help="number of weight steps for slider map (default: %(default)s)",
+    )
 
     # --- insights ---
     p = sub.add_parser(
@@ -3193,16 +4011,31 @@ if __name__ == "__main__":
             variance_threshold=args.pca_variance,
         )
     elif args.command == "map":
-        flavor_map(
-            no_decaf=no_decaf,
-            exclude_urls=args.exclude,
-            available_only=args.available,
-            variance_threshold=args.pca_variance,
-            output_path=args.output,
-            n_neighbors=args.neighbors,
-            min_dist=args.min_dist,
-            text_mode=args.text_mode,
-        )
+        if args.slider:
+            import os
+
+            slider_output = os.path.splitext(args.output)[0] + "-slider.html"
+            flavor_map_slider(
+                no_decaf=no_decaf,
+                exclude_urls=args.exclude,
+                available_only=args.available,
+                variance_threshold=args.pca_variance,
+                output_path=slider_output,
+                n_neighbors=args.neighbors,
+                min_dist=args.min_dist,
+                n_steps=args.slider_steps,
+            )
+        else:
+            flavor_map(
+                no_decaf=no_decaf,
+                exclude_urls=args.exclude,
+                available_only=args.available,
+                variance_threshold=args.pca_variance,
+                output_path=args.output,
+                n_neighbors=args.neighbors,
+                min_dist=args.min_dist,
+                text_mode=args.text_mode,
+            )
     elif args.command == "insights":
         insights(
             no_decaf=no_decaf,
