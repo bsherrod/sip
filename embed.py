@@ -179,7 +179,7 @@ if __name__ == "__main__":
     else:
         log_level = logging.INFO
     logging.basicConfig(
-        level=log_level, format="%(levelname)s: %(message)s", stream=sys.stderr
+        level=log_level, format="%(asctime)s %(name)s %(levelname)s %(message)s", stream=sys.stderr
     )
 
     conn = init_db()

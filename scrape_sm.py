@@ -330,7 +330,7 @@ def scrape_product(url):
     specs = {}
     specs_idx = html.find("Technical Specifications")
     if specs_idx > 0:
-        chunk = html[specs_idx : specs_idx + 5000]
+        chunk = html[specs_idx: specs_idx + 5000]
         rows = re.findall(
             r"<th[^>]*>\s*(.*?)\s*</th>\s*<td[^>]*>\s*(.*?)\s*</td>",
             chunk,
@@ -346,7 +346,7 @@ def scrape_product(url):
     cupping_notes = None
     cn_idx = html.find("Full Cupping Notes")
     if cn_idx > 0:
-        after = html[cn_idx : cn_idx + 5000]
+        after = html[cn_idx: cn_idx + 5000]
         paragraphs = re.findall(r"<p>(.*?)</p>", after, re.DOTALL)
         if paragraphs:
             cupping_notes = re.sub(r"<[^>]+>", "", paragraphs[0]).strip()
@@ -357,7 +357,7 @@ def scrape_product(url):
     if fn_idx < 0:
         fn_idx = html.find("Origin & Farm Notes")
     if fn_idx > 0:
-        after = html[fn_idx : fn_idx + 5000]
+        after = html[fn_idx: fn_idx + 5000]
         paragraphs = re.findall(r"<p>(.*?)</p>", after, re.DOTALL)
         if paragraphs:
             farm_notes = re.sub(r"<[^>]+>", "", paragraphs[0]).strip()
@@ -998,7 +998,7 @@ if __name__ == "__main__":
     else:
         log_level = logging.INFO
     logging.basicConfig(
-        level=log_level, format="%(levelname)s: %(message)s", stream=sys.stderr
+        level=log_level, format="%(asctime)s %(name)s %(levelname)s %(message)s", stream=sys.stderr
     )
 
     no_decaf = not args.decaf
