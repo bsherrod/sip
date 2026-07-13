@@ -10,8 +10,9 @@ import random
 import sqlite3
 import sys
 import time
+from datetime import date
 
-from embed import load_embeddings
+from embed import build_embeddings, load_embeddings
 from scrape_sm import (
     ALL_COLS,
     CUPPING_COLS,
@@ -98,6 +99,27 @@ def _dscale():
 _DISTANCE_METRIC = "l2"
 _TEXT_WEIGHT = 0.0
 _EMBEDDINGS = None
+
+
+def ensure_embeddings(conn):
+    """Build or update text embeddings if any coffees with notes are missing them."""
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS embeddings (
+        url TEXT PRIMARY KEY,
+        model TEXT NOT NULL,
+        vector BLOB NOT NULL,
+        text_hash TEXT NOT NULL)"""
+    )
+    missing = conn.execute(
+        """SELECT COUNT(*) FROM coffees
+        WHERE cupping_notes IS NOT NULL
+        AND url NOT IN (SELECT url FROM embeddings)"""
+    ).fetchone()[0]
+    if missing == 0:
+        return
+    logger.info("embeddings stale: %d coffees need embedding, building now", missing)
+    n_built = build_embeddings(conn)
+    logger.info("embeddings updated: %d new embeddings computed", n_built)
 
 
 def _init_text_embeddings(conn):
@@ -2291,15 +2313,10 @@ def flavor_map_slider(
         var = sum((x - pop_means[j]) ** 2 for x in vals) / len(vals)
         pop_stds[j] = var**0.5 if var > 0 else 0.01
 
-    tried_urls = set(r[0] for r in conn.execute("SELECT url FROM tried").fetchall())
-    tried_ratings = dict(conn.execute("SELECT url, rating FROM tried").fetchall())
     conn.close()
 
     coffees_json = []
     for i, row in enumerate(rows):
-        is_tried = row["url"] in tried_urls
-        rating = tried_ratings.get(row["url"], "0") if is_tried else None
-
         vec = vecs[i]
         z_scores = [
             (DIM_NAMES[j], (vec[j] - pop_means[j]) / pop_stds[j]) for j in range(22)
@@ -2325,8 +2342,6 @@ def flavor_map_slider(
                 "name": row["name"],
                 "url": row["url"],
                 "in_stock": bool(row["in_stock"]),
-                "tried": is_tried,
-                "rating": rating,
                 "numeric": ", ".join(numeric_profile),
                 "text": ", ".join(text_keywords) if text_keywords else "",
             }
@@ -2347,7 +2362,8 @@ def flavor_map_slider(
         separators=(",", ":"),
     )
 
-    html_content = _slider_html_template(data_json)
+    title = f"Sweet Maria's Coffee Flavor Map Explorer, {date.today().strftime('%B %d, %Y')}"
+    html_content = _slider_html_template(data_json, title)
     with open(output_path, "w") as f:
         f.write(html_content)
 
@@ -2360,14 +2376,16 @@ def flavor_map_slider(
     print()
 
 
-def _slider_html_template(data_json):
+def _slider_html_template(data_json, title):
     """Return the self-contained HTML string for the interactive slider map."""
     return (
         """<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
-<title>Coffee Flavor Map — Text Weight Slider</title>
+<title>"""
+        + title
+        + """</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -2482,13 +2500,14 @@ svg {
 </style>
 </head>
 <body>
-<h1>Coffee Flavor Map — Text Weight Explorer</h1>
+<h1>"""
+        + title
+        + """</h1>
 <div class="controls">
-  <span class="endpoints">Numeric only</span>
-  <label>Text Weight:</label>
+  <span class="endpoints">Cupping scores</span>
   <input type="range" id="slider" min="0" max="1" step="0.01" value="0.00">
   <span class="weight-val" id="weight-display">0.00</span>
-  <span class="endpoints">Text only</span>
+  <span class="endpoints">Cupping notes</span>
 </div>
 <div class="info-bar" id="info-bar">Archetypes: <span id="arch-count">\u2014</span></div>
 <div class="map-wrap">
@@ -2572,9 +2591,7 @@ for (let i = 0; i < N; i++) {
   const coffee = coffees[i];
 
   let r, baseOpacity, strokeW, stroke;
-  if (coffee.tried) {
-    r = 6; baseOpacity = 1.0; strokeW = 1.5; stroke = '#fff';
-  } else if (coffee.in_stock) {
+  if (coffee.in_stock) {
     r = 4.5; baseOpacity = 0.85; strokeW = 0; stroke = 'none';
   } else {
     r = 3; baseOpacity = 0.3; strokeW = 0; stroke = 'none';
@@ -2584,28 +2601,11 @@ for (let i = 0; i < N; i++) {
   c.setAttribute('opacity', baseOpacity);
   c.setAttribute('stroke', stroke);
   c.setAttribute('stroke-width', strokeW);
-  c.style.cursor = coffee.in_stock || coffee.tried ? 'pointer' : 'default';
+  c.style.cursor = coffee.in_stock ? 'pointer' : 'default';
   c.dataset.idx = i;
   c.dataset.baseOpacity = baseOpacity;
   circleGroup.appendChild(c);
   circles.push(c);
-}
-
-// Tried coffees: shape indicators
-const triedMarkers = [];
-for (let i = 0; i < N; i++) {
-  const coffee = coffees[i];
-  if (!coffee.tried) continue;
-  const marker = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-  const sym = coffee.rating === '+' ? '\\u25b2' : coffee.rating === '-' ? '\\u25bc' : '\\u25a0';
-  marker.textContent = sym;
-  marker.setAttribute('font-size', '8');
-  marker.setAttribute('fill', '#fff');
-  marker.setAttribute('text-anchor', 'middle');
-  marker.setAttribute('dominant-baseline', 'central');
-  marker.setAttribute('pointer-events', 'none');
-  markerGroup.appendChild(marker);
-  triedMarkers.push({ el: marker, idx: i });
 }
 
 // Center star markers (up to maxArch, hide unused)
@@ -2693,7 +2693,6 @@ function rebuildLegend(fa) {
   const statusItems = [
     { label: '\\u2605 Archetype center', text: '\\u2605' },
     { label: '\\u25c6 Contrast (farthest)', text: '\\u25c6' },
-    { label: 'Tried (outlined)', swatch: 'border: 2px solid #fff; width: 10px; height: 10px;' },
     { label: 'In stock', swatch: 'background: #888; width: 9px; height: 9px;' },
     { label: 'Out of stock', swatch: 'background: #888; opacity: 0.3; width: 7px; height: 7px;' }
   ];
@@ -2738,13 +2737,6 @@ function interpolate(weight) {
     const [sx, sy] = toSVG(x, y);
     circles[i].setAttribute('cx', sx);
     circles[i].setAttribute('cy', sy);
-  }
-
-  // Update tried markers
-  for (const { el, idx } of triedMarkers) {
-    const [sx, sy] = toSVG(positions[idx][0], positions[idx][1]);
-    el.setAttribute('x', sx);
-    el.setAttribute('y', sy);
   }
 
   // Update center stars and contrasts for current archetype set
@@ -2820,11 +2812,7 @@ svg.addEventListener('mousemove', (e) => {
         + '<span class="value">' + coffee.text + '</span></div>';
     }
 
-    let status = coffee.tried ? 'Tried' : (coffee.in_stock ? 'In stock' : 'Out of stock');
-    if (coffee.tried && coffee.rating) {
-      const r = {'+': ' (liked)', '0': ' (neutral)', '-': ' (disliked)'}[coffee.rating] || '';
-      status += r;
-    }
+    let status = coffee.in_stock ? 'In stock' : 'Out of stock';
 
     tooltip.innerHTML = '<div class="tt-name">' + coffee.name + '</div>'
       + '<div class="tt-arch">' + arch.name + '</div>'
@@ -3361,9 +3349,6 @@ def flavor_map(
         umap_desc = f"UMAP({n_pca}D PCA → 2D)"
 
     # Classify each coffee
-    tried_urls = set(r[0] for r in conn.execute("SELECT url FROM tried").fetchall())
-    tried_ratings = dict(conn.execute("SELECT url, rating FROM tried").fetchall())
-
     dominant_arch = np.argmax(alpha, axis=1)
 
     # Color palette for archetypes
@@ -3380,17 +3365,9 @@ def flavor_map(
         x, y = embedding[i]
         arch_idx = dominant_arch[i]
         color = colors[arch_idx]
-        is_tried = row["url"] in tried_urls
         in_stock = row["in_stock"]
 
-        if is_tried:
-            rating = tried_ratings.get(row["url"], "0")
-            marker = {"+": "^", "0": "s", "-": "v"}.get(rating, "o")
-            size = 120
-            edge_color = "white"
-            edge_width = 1.5
-            zorder = 10
-        elif in_stock:
+        if in_stock:
             marker = "o"
             size = 60
             edge_color = "none"
@@ -3416,25 +3393,16 @@ def flavor_map(
 
         ax.scatter(x, y, **scatter_kwargs)
 
-    # Label tried coffees and purest archetype expressions
+    # Label purest archetype expressions
     labeled_indices = set()
-
-    # Label all tried coffees
-    for i, row in enumerate(rows):
-        if row["url"] in tried_urls:
-            labeled_indices.add(i)
 
     # Find archetype centers (purest expression) and contrasts, highlight them
     arch_center_indices = []
     arch_contrast_indices = []
-    avail_indices = [
-        i
-        for i, row in enumerate(rows)
-        if row["in_stock"] and row["url"] not in tried_urls
-    ]
+    avail_indices = [i for i, row in enumerate(rows) if row["in_stock"]]
 
     for ai in range(n_arch):
-        # Purest expression: highest alpha for this archetype (prefer in-stock untried)
+        # Purest expression: highest alpha for this archetype (prefer in-stock)
         best_idx = None
         best_w = 0
         for i in avail_indices:
@@ -3561,50 +3529,11 @@ def flavor_map(
         Line2D(
             [0],
             [0],
-            marker="^",
-            color="w",
-            markerfacecolor="gray",
-            markeredgecolor="white",
-            markersize=10,
-            label="Tried (liked)",
-            linestyle="None",
-        )
-    )
-    legend_elements.append(
-        Line2D(
-            [0],
-            [0],
-            marker="s",
-            color="w",
-            markerfacecolor="gray",
-            markeredgecolor="white",
-            markersize=10,
-            label="Tried (neutral)",
-            linestyle="None",
-        )
-    )
-    legend_elements.append(
-        Line2D(
-            [0],
-            [0],
-            marker="v",
-            color="w",
-            markerfacecolor="gray",
-            markeredgecolor="white",
-            markersize=10,
-            label="Tried (disliked)",
-            linestyle="None",
-        )
-    )
-    legend_elements.append(
-        Line2D(
-            [0],
-            [0],
             marker="o",
             color="w",
             markerfacecolor="gray",
             markersize=8,
-            label="Untried (in stock)",
+            label="In stock",
             linestyle="None",
         )
     )
@@ -3689,7 +3618,7 @@ def flavor_map(
     internal_h = fig.get_size_inches()[1] * fig.dpi
     hotspots = []
     for i, row in enumerate(rows):
-        if not row["in_stock"] or row["url"] in tried_urls:
+        if not row["in_stock"]:
             continue
         display_coords = ax.transData.transform(embedding[i])
         pct_x = display_coords[0] / internal_w * 100
@@ -3719,42 +3648,7 @@ def flavor_map(
     print(f"  {len(rows)} coffees, {n_arch} archetypes, {umap_desc}")
     print(f"  UMAP params: n_neighbors={n_neighbors}, min_dist={min_dist}")
     print(f"  Text mode: {text_mode}")
-    print(f"  {len(hotspots)} clickable hotspots (in-stock, untried)")
-
-    # Text summary: spatial observations
-    tried_indices = [i for i, r in enumerate(rows) if r["url"] in tried_urls]
-    untried_avail = [
-        i for i, r in enumerate(rows) if r["url"] not in tried_urls and r["in_stock"]
-    ]
-
-    if tried_indices and untried_avail:
-        tried_emb = embedding[tried_indices]
-        tried_center = tried_emb.mean(axis=0)
-        tried_radius = np.max(np.linalg.norm(tried_emb - tried_center, axis=1))
-
-        # Find untried coffees farthest from tried center
-        untried_dists = [
-            (i, float(np.linalg.norm(embedding[i] - tried_center)))
-            for i in untried_avail
-        ]
-        untried_dists.sort(key=lambda x: -x[1])
-
-        print("\n  ── Spatial Blind Spots ──")
-        print(f"  Your tried coffees span a radius of {tried_radius:.2f} in 2D space.")
-        print("  Farthest available coffees from your explored region:\n")
-        for idx, dist in untried_dists[:5]:
-            coffee = rows[idx]
-            arch_idx = dominant_arch[idx]
-            mix = alpha[idx]
-            top_arch = sorted(
-                [(archetype_names[a], mix[a]) for a in range(n_arch)],
-                key=lambda x: -x[1],
-            )
-            parts_str = " + ".join(f"{n} {w:.0%}" for n, w in top_arch if w > 0.1)
-            beyond = "⚡" if dist > tried_radius else " "
-            print(f"    {beyond} {coffee['name']} (dist={dist:.2f})")
-            print(f"       {coffee['url']}")
-            print(f"       {parts_str}")
+    print(f"  {len(hotspots)} clickable hotspots (in-stock)")
 
     print()
     conn.close()
@@ -3928,8 +3822,7 @@ if __name__ == "__main__":
         "--slider",
         action="store_true",
         help="generate interactive HTML with text-weight slider (0→1). "
-        "Pre-computes UMAP at multiple steps with Procrustes alignment. "
-        "Requires embeddings: run 'python embed.py build' first.",
+        "Pre-computes UMAP at multiple steps with Procrustes alignment.",
     )
     p.add_argument(
         "--slider-steps",
@@ -3969,7 +3862,9 @@ if __name__ == "__main__":
     else:
         log_level = logging.INFO
     logging.basicConfig(
-        level=log_level, format="%(levelname)s: %(message)s", stream=sys.stderr
+        level=log_level,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        stream=sys.stderr,
     )
 
     no_decaf = not args.decaf
@@ -3980,6 +3875,7 @@ if __name__ == "__main__":
     conn = sqlite3.connect(DB_PATH)
     if use_zscore:
         init_zscore(conn)
+    ensure_embeddings(conn)
     _init_text_embeddings(conn)
     conn.close()
 
