@@ -1088,6 +1088,208 @@ def compare(query, no_decaf=False):
     conn.close()
 
 
+def _min_weight_matching(n, weight_fn):
+    """Find the minimum-weight perfect matching for n items (n must be even).
+
+    Uses recursive enumeration — fine for n <= ~14 (double-factorial growth).
+    Returns list of (i, j) pairs.
+    """
+    items = list(range(n))
+
+    def solve(remaining):
+        if len(remaining) < 2:
+            return [], 0
+        first = remaining[0]
+        rest = remaining[1:]
+        best_pairs = None
+        best_cost = float("inf")
+        for idx, partner in enumerate(rest):
+            leftover = rest[:idx] + rest[idx + 1 :]
+            sub_pairs, sub_cost = solve(leftover)
+            cost = weight_fn(first, partner) + sub_cost
+            if cost < best_cost:
+                best_cost = cost
+                best_pairs = [(first, partner)] + sub_pairs
+        return best_pairs, best_cost
+
+    pairs, _ = solve(items)
+    return pairs
+
+
+def pairs(queries):
+    """Assign coffees into tasting contrast pairs based on flavor similarity.
+
+    Uses the antipode method: for each coffee, reflect it through the population
+    centroid to find its "opposite", then check which of the other input coffees
+    is closest to that opposite. Mutual antipode matches are locked in first;
+    remaining coffees are paired via minimum-weight matching on antipode distance.
+    """
+    conn = init_db()
+    conn.row_factory = sqlite3.Row
+
+    coffees = []
+    for q in queries:
+        c = find_coffee(conn, q, "pairs")
+        if not c:
+            conn.close()
+            return
+        if not c["dry_fragrance"]:
+            print(f"Found '{c['name']}' but it has no flavor data.")
+            conn.close()
+            return
+        coffees.append(c)
+
+    if len(coffees) < 2:
+        print("Need at least 2 coffees to form pairs.")
+        conn.close()
+        return
+
+    all_scored = get_scored_coffees(conn, no_decaf=False)
+    all_vecs = [to_vector(c) for c in all_scored]
+    weighted_distance = make_weighted_distance(all_vecs)
+    stddevs = compute_dim_stddevs(all_vecs)
+
+    vecs = [to_vector(c) for c in coffees]
+    n = len(coffees)
+
+    # Compute population centroid.
+    ndims = len(vecs[0])
+    centroid = [sum(v[d] for v in all_vecs) / len(all_vecs) for d in range(ndims)]
+
+    # For odd count, drop the coffee whose antipode is furthest from all others
+    # in the set (hardest to pair as a contrast).
+    leftover = None
+    if n % 2 == 1:
+        antipodes = [
+            [2 * centroid[d] - vecs[i][d] for d in range(ndims)] for i in range(n)
+        ]
+        min_anti_dists = []
+        for i in range(n):
+            d = min(
+                weighted_distance(antipodes[i], vecs[j]) for j in range(n) if j != i
+            )
+            min_anti_dists.append(d)
+        drop_idx = max(range(n), key=lambda i: min_anti_dists[i])
+        leftover = coffees[drop_idx]
+        coffees = [c for i, c in enumerate(coffees) if i != drop_idx]
+        vecs = [v for i, v in enumerate(vecs) if i != drop_idx]
+        n -= 1
+
+    # Compute antipode for each coffee (reflection through centroid).
+    antipodes = [[2 * centroid[d] - vecs[i][d] for d in range(ndims)] for i in range(n)]
+
+    # For each coffee, rank the others by proximity to its antipode.
+    # antipode_pick[i] = index of the coffee closest to i's antipode.
+    antipode_pick = []
+    for i in range(n):
+        ranked = sorted(
+            (j for j in range(n) if j != i),
+            key=lambda j: weighted_distance(antipodes[i], vecs[j]),
+        )
+        antipode_pick.append(ranked[0])
+
+    # Find mutual antipode matches (i picks j AND j picks i).
+    paired = [False] * n
+    matching = []
+    for i in range(n):
+        if paired[i]:
+            continue
+        j = antipode_pick[i]
+        if not paired[j] and antipode_pick[j] == i:
+            matching.append((i, j))
+            paired[i] = True
+            paired[j] = True
+
+    # For remaining unpaired coffees, use min-weight matching on antipode distance.
+    remaining = [i for i in range(n) if not paired[i]]
+    if len(remaining) >= 2:
+        # Weight = distance from j to antipode of i + distance from i to antipode of j
+        # (symmetric contrast quality)
+        def antipode_weight(ri, rj):
+            i, j = remaining[ri], remaining[rj]
+            return weighted_distance(antipodes[i], vecs[j]) + weighted_distance(
+                antipodes[j], vecs[i]
+            )
+
+        sub_matching = _min_weight_matching(len(remaining), antipode_weight)
+        for ri, rj in sub_matching:
+            matching.append((remaining[ri], remaining[rj]))
+
+    ds = _dscale()
+
+    print(f"\n{'━' * 60}")
+    print("  TASTING PAIRS — Contrast Assignments")
+    print(f"  {n} coffees → {len(matching)} pairs")
+    print(f"{'━' * 60}\n")
+
+    for pair_num, (i, j) in enumerate(matching, 1):
+        a, b = coffees[i], coffees[j]
+        va, vb = vecs[i], vecs[j]
+
+        # Determine pairing method.
+        mutual = antipode_pick[i] == j and antipode_pick[j] == i
+        method = "mutual antipode" if mutual else "antipode matching"
+
+        # Find the dimension with the largest absolute gap.
+        dim_gaps = []
+        for d in range(ndims):
+            gap = (va[d] - vb[d]) * ds[d]
+            dim_gaps.append((abs(gap), gap, d))
+        dim_gaps.sort(key=lambda x: -x[0])
+
+        contrast_dim_idx = dim_gaps[0][2]
+        contrast_gap = dim_gaps[0][1]
+        contrast_name = DIM_NAMES[contrast_dim_idx]
+
+        # Determine HIGH and LOW.
+        if contrast_gap > 0:
+            high, low = a, b
+            high_val = va[contrast_dim_idx] * ds[contrast_dim_idx]
+            low_val = vb[contrast_dim_idx] * ds[contrast_dim_idx]
+        else:
+            high, low = b, a
+            high_val = vb[contrast_dim_idx] * ds[contrast_dim_idx]
+            low_val = va[contrast_dim_idx] * ds[contrast_dim_idx]
+
+        # Residual distance (all dims except contrast dim).
+        residual = (
+            sum((va[d] - vb[d]) ** 2 for d in range(ndims) if d != contrast_dim_idx)
+            ** 0.5
+        )
+
+        dist = weighted_distance(
+            va, vb, url_a=coffees[i]["url"], url_b=coffees[j]["url"]
+        )
+
+        print(f"  Pair {pair_num}: isolates {contrast_name}  [{method}]")
+        print(f"  {'─' * 50}")
+        print(f"    HIGH ({contrast_name}={high_val:.1f}): {high['name']}")
+        print(f"    LOW  ({contrast_name}={low_val:.1f}): {low['name']}")
+        print(
+            f"    Gap: {abs(contrast_gap):.2f}  |  Residual dist: {residual:.3f}  |  Total dist: {dist:.3f}"
+        )
+
+        # Show secondary differences if any are notable.
+        secondary = [
+            (DIM_NAMES[d], gap * (1 if contrast_gap > 0 else -1))
+            for _, gap, d in dim_gaps[1:4]
+            if dim_gaps[0][0] > 0 and abs(gap) > 0.3 * stddevs[d] * ds[d]
+        ]
+        if secondary:
+            sec_str = ", ".join(
+                f"{n} {'↑' if g > 0 else '↓'}{abs(g):.1f}" for n, g in secondary
+            )
+            print(f"    Also differs: {sec_str}")
+        print()
+
+    if leftover:
+        print(f"  ⚠ Unpaired (odd count): {leftover['name']}")
+        print(f"    {leftover['url']}")
+        print()
+
+    conn.close()
+
+
 def explore(no_decaf=False, exclude_urls=None):
     """For each flavor dimension, find a high/low pair that are otherwise similar."""
     conn = init_db()
@@ -3739,6 +3941,18 @@ if __name__ == "__main__":
         help="find high/low pairs per dimension to isolate flavors",
     )
 
+    # --- pairs ---
+    p = sub.add_parser(
+        "pairs",
+        parents=[common],
+        help="assign coffees into tasting contrast pairs by flavor similarity",
+    )
+    p.add_argument(
+        "coffees",
+        nargs="+",
+        help="coffee names (fuzzy) or URLs to pair up",
+    )
+
     # --- factors ---
     p = sub.add_parser(
         "factors",
@@ -3890,6 +4104,8 @@ if __name__ == "__main__":
         compare(args.query, no_decaf=no_decaf)
     elif args.command == "explore":
         explore(no_decaf=no_decaf, exclude_urls=args.exclude)
+    elif args.command == "pairs":
+        pairs(args.coffees)
     elif args.command == "factors":
         factors(
             no_decaf=no_decaf,

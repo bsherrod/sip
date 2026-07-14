@@ -36,7 +36,7 @@ def _http_get(url):
 
 
 def find_coffee(conn, query: str, cmd: str):
-    """Look up a coffee by URL or name. Returns row or None (prints disambiguation/not found)."""
+    """Look up a coffee by URL, product number, or name. Returns row or None."""
     if query.startswith("http"):
         row = conn.execute(
             "SELECT * FROM coffees WHERE url = ? OR url LIKE ?", (query, f"%{query}%")
@@ -44,6 +44,21 @@ def find_coffee(conn, query: str, cmd: str):
         if not row:
             print(f"No coffee found matching '{query}'")
         return row
+    if query.isdigit():
+        rows = conn.execute(
+            "SELECT * FROM coffees WHERE url LIKE ?", (f"%-{query}",)
+        ).fetchall()
+        if len(rows) == 1:
+            return rows[0]
+        if not rows:
+            print(f"No coffee found with product number '{query}'")
+            return None
+        print(f"Multiple coffees match product number '{query}':\n")
+        for r in rows:
+            print(f"  {r['name']}")
+            print(f'    ./scrape_sm.py {cmd} "{r["url"]}"')
+            print()
+        return None
     rows = conn.execute(
         "SELECT * FROM coffees WHERE name LIKE ? ORDER BY total_score DESC",
         (f"%{query}%",),
@@ -330,7 +345,7 @@ def scrape_product(url):
     specs = {}
     specs_idx = html.find("Technical Specifications")
     if specs_idx > 0:
-        chunk = html[specs_idx: specs_idx + 5000]
+        chunk = html[specs_idx : specs_idx + 5000]
         rows = re.findall(
             r"<th[^>]*>\s*(.*?)\s*</th>\s*<td[^>]*>\s*(.*?)\s*</td>",
             chunk,
@@ -346,7 +361,7 @@ def scrape_product(url):
     cupping_notes = None
     cn_idx = html.find("Full Cupping Notes")
     if cn_idx > 0:
-        after = html[cn_idx: cn_idx + 5000]
+        after = html[cn_idx : cn_idx + 5000]
         paragraphs = re.findall(r"<p>(.*?)</p>", after, re.DOTALL)
         if paragraphs:
             cupping_notes = re.sub(r"<[^>]+>", "", paragraphs[0]).strip()
@@ -357,7 +372,7 @@ def scrape_product(url):
     if fn_idx < 0:
         fn_idx = html.find("Origin & Farm Notes")
     if fn_idx > 0:
-        after = html[fn_idx: fn_idx + 5000]
+        after = html[fn_idx : fn_idx + 5000]
         paragraphs = re.findall(r"<p>(.*?)</p>", after, re.DOTALL)
         if paragraphs:
             farm_notes = re.sub(r"<[^>]+>", "", paragraphs[0]).strip()
@@ -998,7 +1013,9 @@ if __name__ == "__main__":
     else:
         log_level = logging.INFO
     logging.basicConfig(
-        level=log_level, format="%(asctime)s %(name)s %(levelname)s %(message)s", stream=sys.stderr
+        level=log_level,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        stream=sys.stderr,
     )
 
     no_decaf = not args.decaf
