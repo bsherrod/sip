@@ -19,9 +19,10 @@ navigate the flavor space to find your next bag.
   characteristics
 - **Cluster** the catalog into flavor families with k-means and silhouette
   analysis
-- **Map** the entire flavor space onto a 2D UMAP visualization with archetype
-  coloring, center/contrast markers, and an interactive text-weight slider
-  ([example](https://htmlpreview.github.io/?https://github.com/bsherrod/sip/blob/main/examples/flavor-map-slider.html))
+- **HTML report** — a single interactive page with UMAP scatter (text-weight
+  slider), archetype radars, correlation heatmap, score distributions, PCA
+  loadings, processing profiles, explore pairs, and superlatives
+  ([example](https://htmlpreview.github.io/?https://github.com/bsherrod/sip/blob/main/examples/flavor-report.html))
 - **Text embeddings** to incorporate cupping-note semantics into distance
   calculations and map layout
 - **Factor analysis** to reveal latent flavor themes and gaps in your
@@ -45,11 +46,9 @@ python coffee.py recommend
 # Compare a specific coffee
 python coffee.py compare "ethiopia natural"
 
-# Generate flavor maps
-python coffee.py map                          # numeric only (PNG + HTML)
-python coffee.py map --text-mode blended      # hybrid distance matrix
-python coffee.py map --text-mode concat       # concatenated PCA vectors
-python coffee.py map --slider                 # interactive text-weight slider
+# Generate interactive HTML report
+python coffee.py html                         # full report with all visualizations
+python coffee.py html --slider-steps 11       # fewer UMAP frames (faster)
 ```
 
 ## Commands
@@ -63,8 +62,8 @@ python coffee.py map --slider                 # interactive text-weight slider
 | `coffee.py insights` | Outliers, clusters, superlatives |
 | `coffee.py factors` | PCA factor analysis of latent themes |
 | `coffee.py archetypes` | Extreme styles and mixture decomposition |
-| `coffee.py map` | 2D UMAP flavor map as PNG + interactive HTML |
-| `coffee.py map --slider` | Interactive HTML with text-weight slider |
+| `coffee.py html` | Interactive HTML report with all visualizations |
+| `coffee.py map` | Alias for `html` |
 | `embed.py build` | Compute sentence embeddings for cupping notes |
 | `embed.py status` | Show embedding coverage |
 
@@ -84,11 +83,9 @@ Once built, embeddings unlock two features:
 
 - **`--text-weight W`** (global flag, 0.0–1.0) — blends text cosine similarity
   into the distance function used by `recommend` and `compare`.
-- **`--text-mode MODE`** (for `map`) — controls how text influences the UMAP
-  layout:
-  - `none` — numeric PCA scores only (default, original behavior)
-  - `blended` — precomputed distance matrix mixing numeric L2 + text cosine
-  - `concat` — PCA-reduced text embeddings concatenated with numeric scores
+- **UMAP slider** (in `html` report) — pre-computes UMAP layouts at multiple
+  text-weight steps (0→1) with Procrustes alignment so you can smoothly see how
+  text semantics reshape the flavor map.
 
 ## Database
 
