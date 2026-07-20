@@ -22,7 +22,7 @@ navigate the flavor space to find your next bag.
 - **HTML report** — a single interactive page with UMAP scatter (text-weight
   slider), archetype radars, correlation heatmap, score distributions, PCA
   loadings, processing profiles, explore pairs, and superlatives
-  ([example](https://htmlpreview.github.io/?https://github.com/bsherrod/sip/blob/main/examples/flavor-report.html))
+  ([example](https://bsherrod.github.io/sip/examples/flavor-report.html))
 - **Text embeddings** to incorporate cupping-note semantics into distance
   calculations and map layout
 - **Factor analysis** to reveal latent flavor themes and gaps in your
