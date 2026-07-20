@@ -13,8 +13,8 @@ navigate the flavor space to find your next bag.
   farm details, availability)
 - **Recommend** coffees that maximize flavor variation from beans you've already
   tried
-- **Compare** any coffee against your collection — see where it sits in the
-  flavor space
+- **Profile** any coffee — see its dimension rankings, archetype mix, contrast
+  pair (antipode), cluster placement, and nearest in-stock substitute
 - **Explore** high/low pairs per flavor dimension to isolate specific taste
   characteristics
 - **Cluster** the catalog into flavor families with k-means and silhouette
@@ -57,7 +57,8 @@ python coffee.py map --slider                 # interactive text-weight slider
 | Command | Description |
 |---------|-------------|
 | `coffee.py recommend` | Suggest next beans (max variation from tried) |
-| `coffee.py compare <query>` | Place a coffee in your flavor landscape |
+| `coffee.py profile <query>` | Full coffee dossier: rankings, archetypes, antipode |
+| `coffee.py compare <query>` | Alias for `profile` |
 | `coffee.py explore` | Find contrast pairs to isolate dimensions |
 | `coffee.py insights` | Outliers, clusters, superlatives |
 | `coffee.py factors` | PCA factor analysis of latent themes |

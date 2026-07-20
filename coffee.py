@@ -926,14 +926,14 @@ def insights(
     conn.close()
 
 
-def compare(query, no_decaf=False):
-    """Compare a single coffee to tried coffees and place it in k-means clusters."""
+def profile(query, no_decaf=False):
+    """Profile a single coffee: dimensions, archetype mix, contrast pair, cluster placement."""
     random.seed(42)
 
     conn = init_db()
     conn.row_factory = sqlite3.Row
 
-    target = find_coffee(conn, query, "compare")
+    target = find_coffee(conn, query, "profile")
     if not target:
         conn.close()
         return
@@ -995,7 +995,7 @@ def compare(query, no_decaf=False):
 
     stock_str = "In Stock ✅" if target["in_stock"] else "Out of Stock ❌"
     print(f"\n{'━' * 60}")
-    print(f"  COMPARE: {target['name']}")
+    print(f"  PROFILE: {target['name']}")
     print(f"{'━' * 60}")
     print(f"  Score: {target['total_score']}  |  ${target['price']}  |  {stock_str}")
     print(f"  Processing: {target['processing']}")
@@ -1084,6 +1084,158 @@ def compare(query, no_decaf=False):
                 print("       Very close flavor match!")
             print()
 
+    # ── Nearest In-Stock Substitute (only if target is out of stock) ──
+    if not target["in_stock"]:
+        in_stock_others = [
+            c
+            for c in all_scored
+            if c["in_stock"] and c["url"] != target["url"] and not _is_blend(c)
+        ]
+        if in_stock_others:
+            sub_scored = [
+                (
+                    c,
+                    weighted_distance(
+                        to_vector(c), target_vec, url_a=c["url"], url_b=target["url"]
+                    ),
+                )
+                for c in in_stock_others
+            ]
+            sub_scored.sort(key=lambda x: x[1])
+            best_sub, best_sub_dist = sub_scored[0]
+            bvec = to_vector(best_sub)
+            diffs = [
+                (DIMS[j][0], bvec[j] * _dscale()[j] - target_vec[j] * _dscale()[j])
+                for j in range(22)
+                if abs(bvec[j] - target_vec[j]) > 0.5 * stddevs[j]
+            ]
+            diffs.sort(key=lambda x: -abs(x[1]))
+            higher = [f"{n}+{d:.1f}" for n, d in diffs if d > 0][:3]
+            lower = [f"{n}{d:.1f}" for n, d in diffs if d < 0][:2]
+            print("\n  ── Nearest In-Stock Substitute ──")
+            print(f"    {best_sub['name']}  (dist={best_sub_dist:.3f})")
+            print(f"    {best_sub['url']}")
+            print(f"    Score: {best_sub['total_score']}  |  ${best_sub['price']}")
+            desc = []
+            if higher:
+                desc.append(f"more {', '.join(higher)}")
+            if lower:
+                desc.append(f"less {', '.join(lower)}")
+            if desc:
+                print(f"    vs target: {'; '.join(desc)}")
+            else:
+                print("    Nearly identical flavor profile!")
+
+    # ── Contrast Pair (Antipode) ──
+    # Reflect target through population centroid to find its opposite
+    ndims = len(target_vec)
+    antipode = [2 * centroid[d] - target_vec[d] for d in range(ndims)]
+    in_stock_pool = [
+        (i, c)
+        for i, c in enumerate(all_scored)
+        if c["in_stock"] and c["url"] != target["url"] and not _is_blend(c)
+    ]
+    if in_stock_pool:
+        anti_scored = [
+            (c, weighted_distance(to_vector(c), antipode)) for _, c in in_stock_pool
+        ]
+        anti_scored.sort(key=lambda x: x[1])
+        contrast_coffee, contrast_dist = anti_scored[0]
+        cvec = to_vector(contrast_coffee)
+        # Find the dimension with the largest gap
+        dim_gaps = [
+            (abs((target_vec[d] - cvec[d]) * _dscale()[d]), d) for d in range(ndims)
+        ]
+        dim_gaps.sort(key=lambda x: -x[0])
+        top_contrast_dim = DIM_NAMES[dim_gaps[0][1]]
+        target_val = target_vec[dim_gaps[0][1]] * _dscale()[dim_gaps[0][1]]
+        contrast_val = cvec[dim_gaps[0][1]] * _dscale()[dim_gaps[0][1]]
+        print("\n  ── Contrast Pair (Antipode) ──")
+        print(f"    {contrast_coffee['name']}")
+        print(f"    {contrast_coffee['url']}")
+        print(
+            f"    Key axis: {top_contrast_dim} "
+            f"(target={target_val:.1f} vs contrast={contrast_val:.1f})"
+        )
+        # Show top 3 secondary differences
+        secondary = [
+            (DIM_NAMES[d], (target_vec[d] - cvec[d]) * _dscale()[d])
+            for _, d in dim_gaps[1:4]
+            if abs((target_vec[d] - cvec[d]) * _dscale()[d]) > 0.2
+        ]
+        if secondary:
+            sec_str = ", ".join(
+                f"{n} {'↑' if g > 0 else '↓'}{abs(g):.1f}" for n, g in secondary
+            )
+            print(f"    Also differs: {sec_str}")
+
+    # ── Dimension Rankings ──
+    # For top standout dimensions, show where this coffee ranks in the catalog
+    ds = _dscale()
+    scored_dims = [(d, target_vec[d] * ds[d], DIM_NAMES[d]) for d in range(ndims)]
+    scored_dims.sort(key=lambda x: -x[1])
+    top_dims = [(d, val, name) for d, val, name in scored_dims if val > 0.3][:5]
+    if top_dims:
+        print("\n  ── Dimension Rankings ──")
+        for d, val, name in top_dims:
+            # Rank among all scored coffees on this dimension
+            all_vals = sorted(
+                [to_vector(c)[d] * ds[d] for c in all_scored], reverse=True
+            )
+            rank = next(
+                (i + 1 for i, v in enumerate(all_vals) if v <= val), len(all_vals)
+            )
+            total = len(all_vals)
+            pctile = int((total - rank) / total * 100)
+            print(
+                f"    {name}: {val:.1f} — #{rank} of {total} "
+                f"({_ordinal(pctile)} pctile)"
+            )
+
+    # ── Archetype Decomposition ──
+    import numpy as np
+
+    vecs_all = [to_vector(c) for c in all_scored]
+    pca = pca_reduce(vecs_all, variance_threshold=0.80)
+    scores_pca = np.array(pca["scores"])
+    components = np.array(pca["components"])
+    mean_pca = np.array(pca["mean"])
+
+    n_arch = _pick_n_archetypes(scores_pca)
+    if isinstance(n_arch, tuple):
+        n_arch = n_arch[0]
+    aa = archetypal_analysis(scores_pca, n_arch)
+    alpha_mat = np.array(aa["alpha"])
+    arch_22d = np.array(aa["archetypes"]) @ components + mean_pca
+
+    # Name each archetype by its top deviating dimensions
+    arch_names = []
+    for ai in range(n_arch):
+        arch_vec = arch_22d[ai]
+        diffs = [(DIM_NAMES[j], (arch_vec[j] - mean_pca[j]) * ds[j]) for j in range(22)]
+        diffs.sort(key=lambda x: -abs(x[1]))
+        top_pos = [n for n, d in diffs if d > 0.3 * stddevs[0]][:2]
+        arch_names.append("/".join(top_pos) if top_pos else "Balanced")
+
+    # Find target's row in all_scored to get its alpha weights
+    if target_idx is not None:
+        target_alpha = alpha_mat[target_idx]
+    else:
+        # Target not in scored set — project into PCA and solve for alpha
+        target_pca = (np.array(target_vec) - mean_pca) @ components.T
+        # Approximate: find nearest alpha by projecting
+        dists_to_target = np.linalg.norm(scores_pca - target_pca, axis=1)
+        nearest_idx = int(np.argmin(dists_to_target))
+        target_alpha = alpha_mat[nearest_idx]
+
+    parts = sorted(
+        [(arch_names[a], target_alpha[a]) for a in range(n_arch)],
+        key=lambda x: -x[1],
+    )
+    parts_str = " + ".join(f"{n} {w:.0%}" for n, w in parts if w > 0.05)
+    print("\n  ── Archetype Decomposition ──")
+    print(f"    {parts_str}")
+
     print()
     conn.close()
 
@@ -1104,7 +1256,7 @@ def _min_weight_matching(n, weight_fn):
         best_pairs = None
         best_cost = float("inf")
         for idx, partner in enumerate(rest):
-            leftover = rest[:idx] + rest[idx + 1 :]
+            leftover = rest[:idx] + rest[idx + 1:]
             sub_pairs, sub_cost = solve(leftover)
             cost = weight_fn(first, partner) + sub_cost
             if cost < best_cost:
@@ -3926,11 +4078,11 @@ if __name__ == "__main__":
         help="number of top recommendations (default: %(default)s)",
     )
 
-    # --- compare ---
+    # --- profile ---
     p = sub.add_parser(
-        "compare",
+        "profile",
         parents=[common],
-        help="compare a coffee to tried & place in clusters",
+        help="profile a coffee: dimensions, archetype mix, contrast pair, clusters",
     )
     p.add_argument("query", help="coffee name (fuzzy) or URL")
 
@@ -4100,8 +4252,8 @@ if __name__ == "__main__":
             offline=args.offline,
             top_n=args.top,
         )
-    elif args.command == "compare":
-        compare(args.query, no_decaf=no_decaf)
+    elif args.command == "profile":
+        profile(args.query, no_decaf=no_decaf)
     elif args.command == "explore":
         explore(no_decaf=no_decaf, exclude_urls=args.exclude)
     elif args.command == "pairs":
