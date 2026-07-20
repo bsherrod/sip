@@ -1256,7 +1256,7 @@ def _min_weight_matching(n, weight_fn):
         best_pairs = None
         best_cost = float("inf")
         for idx, partner in enumerate(rest):
-            leftover = rest[:idx] + rest[idx + 1:]
+            leftover = rest[:idx] + rest[idx + 1 :]
             sub_pairs, sub_cost = solve(leftover)
             cost = weight_fn(first, partner) + sub_cost
             if cost < best_cost:
@@ -2453,6 +2453,9 @@ def flavor_map_slider(
 
     import numpy as np
     import umap
+    import warnings
+
+    warnings.filterwarnings("ignore", message="n_jobs value.*overridden.*random_state")
 
     conn = init_db()
     conn.row_factory = sqlite3.Row
@@ -3522,9 +3525,13 @@ def flavor_map(
       - 'blended': precomputed distance matrix blending numeric + text cosine
       - 'concat': concatenate PCA-reduced text embeddings with numeric PCA scores
     """
+    import warnings
+
     import numpy as np
     import umap
     import matplotlib
+
+    warnings.filterwarnings("ignore", message="n_jobs value.*overridden.*random_state")
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -4008,6 +4015,616 @@ def flavor_map(
     conn.close()
 
 
+def html_report(
+    no_decaf=False,
+    exclude_urls=None,
+    available_only=False,
+    variance_threshold=0.80,
+    output_path="flavor-report.html",
+    n_neighbors=10,
+    min_dist=0.3,
+    n_steps=11,
+):
+    """Generate a full interactive HTML report of the catalog flavor space."""
+    import numpy as np
+    from datetime import date as _date
+
+    from report_html import generate_report_html
+
+    conn = init_db()
+    conn.row_factory = sqlite3.Row
+
+    rows = get_scored_coffees(
+        conn,
+        no_decaf=no_decaf,
+        exclude_urls=exclude_urls,
+        available_only=available_only,
+    )
+    if len(rows) < 10:
+        print("Need at least 10 scored coffees for HTML report.")
+        conn.close()
+        return
+
+    vecs = [to_vector(r) for r in rows]
+    n_coffees = len(rows)
+    ds = _dscale()
+
+    # --- PCA ---
+    pca = pca_reduce(vecs, variance_threshold=variance_threshold)
+    n_pca = pca["n_components"]
+    scores = np.array(pca["scores"])
+    components = np.array(pca["components"])
+    mean_pca = np.array(pca["mean"])
+
+    # --- Archetypes ---
+    n_arch, _ = _pick_n_archetypes(scores, seed=42)
+    aa = archetypal_analysis(scores, n_arch, max_iter=300)
+    alpha = np.array(aa["alpha"])
+    arch_scores = np.array(aa["archetypes"])
+    arch_22d = arch_scores @ components + mean_pca
+    dominant = np.argmax(alpha, axis=1)
+
+    # Name archetypes
+    pop_mean = np.array(pca["mean"])
+    stddevs = compute_dim_stddevs(vecs)
+    archetype_names = []
+    archetype_profiles = []
+    for ai in range(n_arch):
+        arch_vec = arch_22d[ai]
+        deviations = [(arch_vec[j] - pop_mean[j]) * ds[j] for j in range(22)]
+        archetype_profiles.append([round(d, 3) for d in deviations])
+        diffs = [(DIM_NAMES[j], deviations[j]) for j in range(22)]
+        diffs.sort(key=lambda x: -abs(x[1]))
+        top_pos = [n for n, d in diffs if d > 0.3 * stddevs[0]][:2]
+        archetype_names.append("/".join(top_pos) if top_pos else "Balanced")
+
+    tab10 = [
+        "#1f77b4",
+        "#ff7f0e",
+        "#2ca02c",
+        "#d62728",
+        "#9467bd",
+        "#8c564b",
+        "#e377c2",
+        "#7f7f7f",
+        "#bcbd22",
+        "#17becf",
+    ]
+    archetype_colors = [tab10[i % len(tab10)] for i in range(n_arch)]
+    archetype_counts = [int(np.sum(dominant == ai)) for ai in range(n_arch)]
+    archetype_counts_instock = [
+        int(
+            sum(
+                1 for i in range(n_coffees) if dominant[i] == ai and rows[i]["in_stock"]
+            )
+        )
+        for ai in range(n_arch)
+    ]
+
+    # Example coffees per archetype (top 3 by alpha weight)
+    archetype_examples = []
+    for ai in range(n_arch):
+        arch_members = [(i, alpha[i, ai]) for i in range(n_coffees)]
+        arch_members.sort(key=lambda x: -x[1])
+        examples = [rows[i]["name"] for i, _ in arch_members[:3]]
+        archetype_examples.append(examples)
+
+    # --- Composition by processing and region ---
+    def _extract_country(name):
+        prefixes = [
+            "Costa Rica",
+            "El Salvador",
+            "Papua New Guinea",
+            "Timor Leste",
+            "Sweet Maria",
+            "East Timor",
+        ]
+        for p in prefixes:
+            if name.startswith(p):
+                return p
+        return name.split()[0]
+
+    processing_counts = {}
+    processing_counts_instock = {}
+    region_counts = {}
+    region_counts_instock = {}
+    for r in rows:
+        proc = r["processing"] or "Unknown"
+        processing_counts[proc] = processing_counts.get(proc, 0) + 1
+        if r["in_stock"]:
+            processing_counts_instock[proc] = processing_counts_instock.get(proc, 0) + 1
+        country = _extract_country(r["name"])
+        region_counts[country] = region_counts.get(country, 0) + 1
+        if r["in_stock"]:
+            region_counts_instock[country] = region_counts_instock.get(country, 0) + 1
+
+    # Sort by count descending
+    composition_processing = sorted(
+        [{"name": k, "count": v} for k, v in processing_counts.items()],
+        key=lambda x: -x["count"],
+    )
+    composition_processing_instock = sorted(
+        [{"name": k, "count": v} for k, v in processing_counts_instock.items()],
+        key=lambda x: -x["count"],
+    )
+    composition_region = sorted(
+        [{"name": k, "count": v} for k, v in region_counts.items()],
+        key=lambda x: -x["count"],
+    )
+    composition_region_instock = sorted(
+        [{"name": k, "count": v} for k, v in region_counts_instock.items()],
+        key=lambda x: -x["count"],
+    )
+
+    # --- UMAP frames (multi text-weight) ---
+    logger.info("computing UMAP frames for slider (%d steps)", n_steps)
+    ensure_embeddings(conn)
+    text_emb = load_embeddings(conn)
+    url_to_emb = {url: emb for url, emb in text_emb.items()}
+    text_vecs_raw = []
+    for r in rows:
+        emb = url_to_emb.get(r["url"])
+        if emb is not None:
+            text_vecs_raw.append(emb)
+        else:
+            text_vecs_raw.append([0.0] * 384)
+    text_scores_raw = np.array(text_vecs_raw)
+    # PCA reduce text embeddings to match numeric dim count
+    from sklearn.decomposition import PCA as SkPCA
+
+    text_pca = SkPCA(n_components=n_pca, random_state=42)
+    text_scores = text_pca.fit_transform(text_scores_raw)
+    # Scale text to same magnitude as numeric
+    num_scale = np.std(scores)
+    txt_scale = np.std(text_scores) if np.std(text_scores) > 0 else 1.0
+    text_scores_scaled = text_scores * (num_scale / txt_scale)
+
+    weights = [i / (n_steps - 1) for i in range(n_steps)]
+
+    # Import UMAP
+    import warnings
+
+    from umap import UMAP
+
+    warnings.filterwarnings("ignore", message="n_jobs value.*overridden.*random_state")
+
+    umap_frames = []
+    prev_embedding = None
+    for step_i, tw in enumerate(weights):
+        logger.info("UMAP frame %d/%d (tw=%.2f)", step_i + 1, n_steps, tw)
+        if tw > 0:
+            combined = np.hstack([scores, text_scores_scaled * tw])
+        else:
+            combined = scores
+
+        init_param = prev_embedding if prev_embedding is not None else "spectral"
+        reducer = UMAP(
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            n_components=2,
+            random_state=42,
+            init=init_param,
+        )
+        embedding = reducer.fit_transform(combined)
+
+        # Procrustes alignment to previous frame for consistent orientation
+        if prev_embedding is not None:
+            from scipy.spatial import procrustes
+
+            _, embedding_aligned, _ = procrustes(prev_embedding, embedding)
+            embedding = embedding_aligned
+        prev_embedding = embedding
+
+        # Archetype analysis for this frame
+        if tw > 0:
+            arch_input = np.hstack([scores, text_scores_scaled * tw])
+        else:
+            arch_input = scores
+        aa_frame = archetypal_analysis(arch_input, n_arch, max_iter=200)
+        alpha_frame = np.array(aa_frame["alpha"])
+        dom_frame = np.argmax(alpha_frame, axis=1).tolist()
+
+        # Name archetypes for this frame from their 22D projection
+        arch_scores_frame = np.array(aa_frame["archetypes"])
+        arch_22d_frame = arch_scores_frame[:, :n_pca] @ components + mean_pca
+        frame_arch_names = []
+        for ai in range(n_arch):
+            arch_vec = arch_22d_frame[ai]
+            diffs = [
+                (DIM_NAMES[j], (arch_vec[j] - pop_mean[j]) * ds[j]) for j in range(22)
+            ]
+            diffs.sort(key=lambda x: -abs(x[1]))
+            top_pos = [n for n, d in diffs if d > 0.3 * stddevs[0]][:2]
+            frame_arch_names.append("/".join(top_pos) if top_pos else "Balanced")
+
+        # Add text keywords to archetype names when text has influence
+        if tw > 0:
+            frame_arch_names = _add_text_keywords(
+                frame_arch_names, alpha_frame, rows, n_arch, conn
+            )
+
+        frame_arch_colors = [tab10[i % len(tab10)] for i in range(n_arch)]
+
+        # Compute archetype centers (purest in-stock) and contrasts (farthest in-stock)
+        avail_idx = [i for i in range(n_coffees) if rows[i]["in_stock"]]
+        centers_info = []
+        contrasts_info = []
+        for ai in range(n_arch):
+            # Center: in-stock coffee with highest alpha for this archetype
+            best_idx = (
+                max(avail_idx, key=lambda i: alpha_frame[i, ai])
+                if avail_idx
+                else int(np.argmax(alpha_frame[:, ai]))
+            )
+            cx, cy = float(embedding[best_idx, 0]), float(embedding[best_idx, 1])
+            centers_info.append({"x": round(cx, 4), "y": round(cy, 4), "idx": best_idx})
+            # Contrast: in-stock coffee farthest from center in 2D
+            contrast_idx = max(
+                (i for i in avail_idx if i != best_idx),
+                key=lambda i: (embedding[i, 0] - cx) ** 2 + (embedding[i, 1] - cy) ** 2,
+                default=best_idx,
+            )
+            contrasts_info.append(
+                {
+                    "x": round(float(embedding[contrast_idx, 0]), 4),
+                    "y": round(float(embedding[contrast_idx, 1]), 4),
+                    "idx": contrast_idx,
+                }
+            )
+
+        umap_frames.append(
+            {
+                "x": [round(float(embedding[i, 0]), 4) for i in range(n_coffees)],
+                "y": [round(float(embedding[i, 1]), 4) for i in range(n_coffees)],
+                "dominant": dom_frame,
+                "archetype_names": frame_arch_names,
+                "archetype_colors": frame_arch_colors,
+                "centers": centers_info,
+                "contrasts": contrasts_info,
+            }
+        )
+
+    # --- Coffee metadata ---
+    # Extract text keywords from cupping notes
+    import re
+
+    _stop = {
+        "this", "that", "with", "from", "have", "been", "will", "also",
+        "very", "more", "some", "than", "into", "when", "which", "there",
+        "their", "about", "would", "could", "other", "after", "coffee",
+        "roast", "notes", "hint", "cups", "like",
+    }
+    notes_by_url = {}
+    for row in conn.execute(
+        "SELECT url, cupping_notes FROM coffees WHERE cupping_notes IS NOT NULL"
+    ).fetchall():
+        notes_by_url[row[0]] = row[1]
+
+    coffees_json = []
+    for i, r in enumerate(rows):
+        vec = vecs[i]
+        top_flavs = sorted(
+            [
+                (DIM_NAMES[d], round(vec[d] * ds[d], 1))
+                for d in range(22)
+                if vec[d] * ds[d] > 0.3
+            ],
+            key=lambda x: -x[1],
+        )[:4]
+        # Text keywords from cupping notes
+        notes = notes_by_url.get(r["url"], "")
+        text_kw = ""
+        if notes:
+            words = re.findall(r"[a-z]{4,}", notes.lower())
+            words = [w for w in words if w not in _stop]
+            freq = {}
+            for w in words:
+                freq[w] = freq.get(w, 0) + 1
+            ranked = sorted(freq.items(), key=lambda x: -x[1])
+            text_kw = ", ".join(w for w, _ in ranked[:5])
+        coffees_json.append(
+            {
+                "name": r["name"],
+                "url": r["url"],
+                "in_stock": bool(r["in_stock"]),
+                "score": r["total_score"],
+                "flavors": ", ".join(f"{n}:{v}" for n, v in top_flavs)
+                if top_flavs
+                else "",
+                "text": text_kw,
+            }
+        )
+
+    # --- Correlations ---
+    correlations = []
+    for i in range(22):
+        row_corr = []
+        for j in range(22):
+            xs = [vecs[k][i] for k in range(n_coffees)]
+            ys = [vecs[k][j] for k in range(n_coffees)]
+            r = pearson_r(xs, ys)
+            row_corr.append(round(r, 4))
+        correlations.append(row_corr)
+
+    # --- Box plot data ---
+    def compute_box(values):
+        s = sorted(values)
+        n = len(s)
+        q1 = s[n // 4]
+        q2 = s[n // 2]
+        q3 = s[(3 * n) // 4]
+        iqr = q3 - q1
+        low = max(s[0], q1 - 1.5 * iqr)
+        high = min(s[-1], q3 + 1.5 * iqr)
+        return [round(low, 3), round(q1, 3), round(q2, 3), round(q3, 3), round(high, 3)]
+
+    box_all = []
+    for d in range(22):
+        col = ALL_COLS[d]
+        vals = [rows[i][col] for i in range(n_coffees) if rows[i][col] is not None]
+        box_all.append(compute_box(vals) if len(vals) >= 4 else [0, 0, 0, 0, 0])
+
+    box_arch_groups = []
+    for ai in range(n_arch):
+        arch_boxes = []
+        indices = [i for i in range(n_coffees) if dominant[i] == ai]
+        for d in range(22):
+            col = ALL_COLS[d]
+            vals = [rows[i][col] for i in indices if rows[i][col] is not None]
+            if len(vals) < 4:
+                arch_boxes.append([0, 0, 0, 0, 0])
+            else:
+                arch_boxes.append(compute_box(vals))
+        box_arch_groups.append(arch_boxes)
+
+    # --- PCA data ---
+    pca_variance = [round(float(v), 4) for v in pca["explained_variance_ratio"]]
+    pca_loadings = [[round(float(c), 4) for c in row] for row in pca["components"]]
+
+    # --- Processing methods ---
+    processing_data = {}
+    for r in rows:
+        proc = r["processing"] or "Unknown"
+        if proc not in processing_data:
+            processing_data[proc] = []
+        processing_data[proc].append(to_vector(r))
+
+    processing_methods = []
+    for proc, proc_vecs in sorted(processing_data.items(), key=lambda x: -len(x[1])):
+        if len(proc_vecs) < 2:
+            continue
+        avg = [
+            round(sum(v[d] for v in proc_vecs) / len(proc_vecs) * ds[d], 2)
+            for d in range(22)
+        ]
+        processing_methods.append(
+            {"name": proc, "count": len(proc_vecs), "values": avg}
+        )
+
+    # --- Explore pairs ---
+    explore_dims = [
+        ("Dry Fragrance", "dry_fragrance"),
+        ("Wet Aroma", "wet_aroma"),
+        ("Brightness", "brightness"),
+        ("Flavor", "flavor"),
+        ("Body", "body"),
+        ("Finish", "finish"),
+        ("Sweetness", "sweetness"),
+        ("Clean Cup", "clean_cup"),
+        ("Complexity", "complexity"),
+        ("Uniformity", "uniformity"),
+        ("Floral", "fl_floral"),
+        ("Honey", "fl_honey"),
+        ("Sugars", "fl_sugars"),
+        ("Caramel", "fl_caramel"),
+        ("Fruits", "fl_fruits"),
+        ("Citrus", "fl_citrus"),
+        ("Berry", "fl_berry"),
+        ("Cocoa", "fl_cocoa"),
+        ("Nuts", "fl_nuts"),
+        ("Rustic", "fl_rustic"),
+        ("Spice", "fl_spice"),
+    ]
+
+    def vec_without(row, exclude_col):
+        cols = [c for c in ALL_COLS if c != exclude_col]
+        return [(row[c] or 0) / (10.0 if c in CUPPING_COLS else 5.0) for c in cols]
+
+    def edist(a, b):
+        return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+    in_stock_rows = [r for r in rows if r["in_stock"] and not _is_blend(r)]
+    all_nonblend_rows = [r for r in rows if not _is_blend(r)]
+
+    def _compute_explore_pairs(source_rows):
+        pairs = []
+        for dim_name, dim_col in explore_dims:
+            with_dim = [(c, c[dim_col]) for c in source_rows if c[dim_col] is not None]
+            if len(with_dim) < 4:
+                continue
+            with_dim.sort(key=lambda x: -x[1])
+            high_cands = with_dim[:5]
+            low_cands = with_dim[-5:]
+            best_pair = None
+            best_other_dist = float("inf")
+            for hc, hv in high_cands:
+                hvec = vec_without(hc, dim_col)
+                for lc, lv in low_cands:
+                    if hv - lv < 1.0:
+                        continue
+                    lvec = vec_without(lc, dim_col)
+                    d = edist(hvec, lvec)
+                    if d < best_other_dist:
+                        best_other_dist = d
+                        best_pair = (hc, hv, lc, lv, d)
+            if best_pair:
+                hc, hv, lc, lv, sim = best_pair
+                pairs.append(
+                    {
+                        "dim": dim_name,
+                        "high_name": hc["name"],
+                        "high_url": hc["url"],
+                        "high_val": hv,
+                        "low_name": lc["name"],
+                        "low_url": lc["url"],
+                        "low_val": lv,
+                        "similarity": sim,
+                    }
+                )
+        return pairs
+
+    explore_pairs = _compute_explore_pairs(in_stock_rows)
+    explore_pairs_all = _compute_explore_pairs(all_nonblend_rows)
+
+    # --- Superlatives ---
+    superlatives = []
+    flavor_dims = [
+        ("Most Floral", "fl_floral"),
+        ("Most Honey", "fl_honey"),
+        ("Most Caramel", "fl_caramel"),
+        ("Most Fruits", "fl_fruits"),
+        ("Most Citrus", "fl_citrus"),
+        ("Most Berry", "fl_berry"),
+        ("Most Cocoa", "fl_cocoa"),
+        ("Most Nuts", "fl_nuts"),
+        ("Most Rustic", "fl_rustic"),
+        ("Most Spice", "fl_spice"),
+        ("Most Brightness", "brightness"),
+        ("Most Body", "body"),
+        ("Most Complexity", "complexity"),
+    ]
+    for label, col in flavor_dims:
+        best = max(rows, key=lambda r: r[col] or 0)
+        superlatives.append(
+            {
+                "category": label,
+                "name": best["name"],
+                "url": best["url"],
+                "value": str(best[col]),
+            }
+        )
+
+    # In-stock superlatives
+    in_stock_rows_all = [r for r in rows if r["in_stock"]]
+    superlatives_instock = []
+    for label, col in flavor_dims:
+        candidates = [r for r in in_stock_rows_all if r[col] is not None]
+        if candidates:
+            best = max(candidates, key=lambda r: r[col] or 0)
+            superlatives_instock.append(
+                {
+                    "category": label,
+                    "name": best["name"],
+                    "url": best["url"],
+                    "value": str(best[col]),
+                }
+            )
+
+    # Outliers (farthest from centroid)
+    centroid = [sum(v[d] for v in vecs) / n_coffees for d in range(22)]
+    weighted_distance = make_weighted_distance(vecs)
+    outlier_dists = [
+        (rows[i], weighted_distance(vecs[i], centroid)) for i in range(n_coffees)
+    ]
+    outlier_dists.sort(key=lambda x: -x[1])
+    outliers = []
+    for r, d in outlier_dists[:5]:
+        vec = to_vector(r)
+        top_devs = sorted(
+            [(DIM_NAMES[j], abs(vec[j] - centroid[j]) * ds[j]) for j in range(22)],
+            key=lambda x: -x[1],
+        )[:3]
+        outliers.append(
+            {
+                "name": r["name"],
+                "url": r["url"],
+                "dist": d,
+                "dims": ", ".join(f"{n} ({v:.1f})" for n, v in top_devs),
+            }
+        )
+
+    # Typicals (closest to centroid)
+    typical_dists = sorted(outlier_dists, key=lambda x: x[1])
+    typicals = [
+        {"name": r["name"], "url": r["url"], "dist": d} for r, d in typical_dists[:3]
+    ]
+
+    # In-stock outliers/typicals
+    outlier_dists_instock = [
+        (rows[i], weighted_distance(vecs[i], centroid))
+        for i in range(n_coffees)
+        if rows[i]["in_stock"]
+    ]
+    outlier_dists_instock.sort(key=lambda x: -x[1])
+    outliers_instock = []
+    for r, d in outlier_dists_instock[:5]:
+        vec = to_vector(r)
+        top_devs = sorted(
+            [(DIM_NAMES[j], abs(vec[j] - centroid[j]) * ds[j]) for j in range(22)],
+            key=lambda x: -x[1],
+        )[:3]
+        outliers_instock.append(
+            {
+                "name": r["name"],
+                "url": r["url"],
+                "dist": d,
+                "dims": ", ".join(f"{n} ({v:.1f})" for n, v in top_devs),
+            }
+        )
+    typicals_instock = [
+        {"name": r["name"], "url": r["url"], "dist": d}
+        for r, d in sorted(outlier_dists_instock, key=lambda x: x[1])[:3]
+    ]
+
+    conn.close()
+
+    # --- Assemble data and generate HTML ---
+    data = {
+        "title": "SIP — Sweet Maria's Flavor Space",
+        "generated_at": str(_date.today()),
+        "n_coffees": n_coffees,
+        "n_instock": sum(1 for r in rows if r["in_stock"]),
+        "umap_frames": umap_frames,
+        "umap_weights": weights,
+        "coffees": coffees_json,
+        "archetypes": archetype_profiles,
+        "archetype_names": archetype_names,
+        "archetype_colors": archetype_colors,
+        "archetype_counts": archetype_counts,
+        "archetype_counts_instock": archetype_counts_instock,
+        "archetype_examples": archetype_examples,
+        "composition_processing": composition_processing,
+        "composition_processing_instock": composition_processing_instock,
+        "composition_region": composition_region,
+        "composition_region_instock": composition_region_instock,
+        "correlations": correlations,
+        "dim_names": DIM_NAMES,
+        "box_data": box_all,
+        "box_archetype_groups": box_arch_groups,
+        "pca_variance": pca_variance,
+        "pca_loadings": pca_loadings,
+        "pca_n_kept": n_pca,
+        "processing_methods": processing_methods,
+        "explore_pairs": explore_pairs,
+        "explore_pairs_all": explore_pairs_all,
+        "superlatives": superlatives,
+        "superlatives_instock": superlatives_instock,
+        "outliers": outliers,
+        "outliers_instock": outliers_instock,
+        "typicals": typicals,
+        "typicals_instock": typicals_instock,
+    }
+
+    html = generate_report_html(data)
+    with open(output_path, "w") as f:
+        f.write(html)
+
+    print(f"\n  HTML report written to: {output_path}")
+    print(f"  {n_coffees} coffees, {n_arch} archetypes, {n_steps} UMAP frames")
+    print(f"  Open in browser: file://{output_path}")
+    print()
+
+
 if __name__ == "__main__":
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--verbose", action="store_true", help="show debug logging")
@@ -4143,17 +4760,18 @@ if __name__ == "__main__":
         help="only analyze currently in-stock coffees",
     )
 
-    # --- map ---
+    # --- html (alias: map) ---
     p = sub.add_parser(
-        "map",
+        "html",
         parents=[common],
-        help="generate 2D UMAP flavor map as PNG",
+        aliases=["map"],
+        help="generate interactive HTML report with all visualizations",
     )
     p.add_argument(
         "--output",
-        default="flavor-map.png",
+        default="flavor-report.html",
         metavar="PATH",
-        help="output PNG path (default: %(default)s)",
+        help="output HTML path (default: %(default)s)",
     )
     p.add_argument(
         "--neighbors",
@@ -4172,30 +4790,14 @@ if __name__ == "__main__":
     p.add_argument(
         "--available",
         action="store_true",
-        help="only map currently in-stock coffees",
-    )
-    p.add_argument(
-        "--text-mode",
-        choices=["none", "blended", "concat"],
-        default="none",
-        metavar="MODE",
-        help="how text embeddings influence layout: none (numeric only), "
-        "blended (precomputed hybrid distance), concat (concatenate reduced "
-        "text+numeric vectors). Requires embeddings: run 'python embed.py build' "
-        "first. (default: %(default)s)",
-    )
-    p.add_argument(
-        "--slider",
-        action="store_true",
-        help="generate interactive HTML with text-weight slider (0→1). "
-        "Pre-computes UMAP at multiple steps with Procrustes alignment.",
+        help="only analyze currently in-stock coffees",
     )
     p.add_argument(
         "--slider-steps",
         type=int,
-        default=11,
+        default=21,
         metavar="N",
-        help="number of weight steps for slider map (default: %(default)s)",
+        help="number of text-weight steps for UMAP slider (default: %(default)s)",
     )
 
     # --- insights ---
@@ -4274,32 +4876,17 @@ if __name__ == "__main__":
             available_only=args.available,
             variance_threshold=args.pca_variance,
         )
-    elif args.command == "map":
-        if args.slider:
-            import os
-
-            slider_output = os.path.splitext(args.output)[0] + "-slider.html"
-            flavor_map_slider(
-                no_decaf=no_decaf,
-                exclude_urls=args.exclude,
-                available_only=args.available,
-                variance_threshold=args.pca_variance,
-                output_path=slider_output,
-                n_neighbors=args.neighbors,
-                min_dist=args.min_dist,
-                n_steps=args.slider_steps,
-            )
-        else:
-            flavor_map(
-                no_decaf=no_decaf,
-                exclude_urls=args.exclude,
-                available_only=args.available,
-                variance_threshold=args.pca_variance,
-                output_path=args.output,
-                n_neighbors=args.neighbors,
-                min_dist=args.min_dist,
-                text_mode=args.text_mode,
-            )
+    elif args.command in ("html", "map"):
+        html_report(
+            no_decaf=no_decaf,
+            exclude_urls=args.exclude,
+            available_only=args.available,
+            variance_threshold=args.pca_variance,
+            output_path=args.output,
+            n_neighbors=args.neighbors,
+            min_dist=args.min_dist,
+            n_steps=args.slider_steps,
+        )
     elif args.command == "insights":
         insights(
             no_decaf=no_decaf,
