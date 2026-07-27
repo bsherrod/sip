@@ -5,7 +5,7 @@
 A command-line toolkit for exploring and selecting green coffee from
 [Sweet Maria's](https://www.sweetmarias.com/). Scrapes the current catalog,
 builds a local database of cupping scores and flavor profiles, then helps you
-navigate the flavor space to find your next bag.
+navigate the flavor space to help you decide what to buy.
 
 ## What it does
 
