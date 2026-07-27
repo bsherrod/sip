@@ -253,6 +253,12 @@ table.data-table tr:hover {{ background: #1f2f50; }}
   <p class="desc">Variance explained per principal component and the dimension loadings that define each factor.</p>
   <div id="chart-pca-var" class="chart chart-short"></div>
   <div id="chart-pca-loadings" class="chart chart-tall"></div>
+  <h3 style="color:#e94560; margin-top:1.5rem; margin-bottom:0.3rem;">PCA Signatures</h3>
+  <p class="desc">Each principal component's loadings shown as a radar — cupping dimensions (left) and flavor intensity (right).</p>
+  <div class="charts-row">
+    <div id="chart-pca-radar-cupping" class="chart" style="height:500px"></div>
+    <div id="chart-pca-radar-flavor" class="chart" style="height:500px"></div>
+  </div>
 </div>
 
 <!-- Section 7: Processing Method Signatures -->
@@ -659,6 +665,63 @@ function initChart(id) {{
     series: [{{ type: 'heatmap', data: loadData, emphasis: {{ itemStyle: {{ borderColor: '#fff', borderWidth: 1 }} }} }}]
   }});
   window.addEventListener('resize', function() {{ chartVar.resize(); chartLoad.resize(); }});
+}})();
+
+// --- Section 6b: PCA Signatures Radar ---
+(function() {{
+  const chartCup = initChart('chart-pca-radar-cupping');
+  const chartFlav = initChart('chart-pca-radar-flavor');
+  const loadings = D.pca_loadings;
+  const dims = D.dim_names;
+  const cupDims = dims.slice(0, 10);
+  const flavDims = dims.slice(10);
+  const colors = ['#e94560','#4dc9f6','#50fa7b','#ffb86c','#bd93f9','#ff79c6','#8be9fd','#f1fa8c','#6272a4','#44475a'];
+
+  // Compute dynamic max for axis scaling
+  let maxAbsCup = 0, maxAbsFlav = 0;
+  loadings.forEach(function(row) {{
+    row.slice(0, 10).forEach(function(v) {{ if (Math.abs(v) > maxAbsCup) maxAbsCup = Math.abs(v); }});
+    row.slice(10).forEach(function(v) {{ if (Math.abs(v) > maxAbsFlav) maxAbsFlav = Math.abs(v); }});
+  }});
+  const maxCup = Math.ceil(maxAbsCup * 1.2 * 100) / 100;
+  const maxFlav = Math.ceil(maxAbsFlav * 1.2 * 100) / 100;
+
+  function makeRadar(chart, dimNames, sliceFn, maxVal, showLegend) {{
+    const indicator = dimNames.map(function(d) {{ return {{ name: d, max: maxVal, min: -maxVal }}; }});
+    const series = loadings.map(function(row, i) {{
+      return {{
+        name: 'PC' + (i+1) + ' (' + (D.pca_variance[i]*100).toFixed(1) + '%)',
+        type: 'radar',
+        data: [{{ value: sliceFn(row), name: 'PC' + (i+1) }}],
+        lineStyle: {{ width: 2 }},
+        areaStyle: {{ opacity: 0.08 }},
+        itemStyle: {{ color: colors[i % colors.length] }}
+      }};
+    }});
+    chart.setOption({{
+      tooltip: {{ trigger: 'item' }},
+      legend: showLegend ? {{ top: 5, textStyle: {{ color: '#ccc', fontSize: 10 }} }} : {{ show: false }},
+      radar: {{ indicator: indicator, shape: 'polygon', splitArea: {{ areaStyle: {{ color: ['#16213e', '#1a2744'] }} }}, axisName: {{ color: '#999', fontSize: 9 }} }},
+      series: series
+    }});
+  }}
+  makeRadar(chartCup, cupDims, function(r) {{ return r.slice(0, 10); }}, maxCup, true);
+  makeRadar(chartFlav, flavDims, function(r) {{ return r.slice(10); }}, maxFlav, false);
+  // Sync legend toggles
+  let syncing = false;
+  chartCup.on('legendselectchanged', function(e) {{
+    if (syncing) return;
+    syncing = true;
+    chartFlav.dispatchAction({{ type: 'legendToggleSelect', name: e.name }});
+    syncing = false;
+  }});
+  chartFlav.on('legendselectchanged', function(e) {{
+    if (syncing) return;
+    syncing = true;
+    chartCup.dispatchAction({{ type: 'legendToggleSelect', name: e.name }});
+    syncing = false;
+  }});
+  window.addEventListener('resize', function() {{ chartCup.resize(); chartFlav.resize(); }});
 }})();
 
 // --- Section 7: Processing Methods ---
