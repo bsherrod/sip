@@ -18,16 +18,16 @@ from scrape_sm import (
     CUPPING_COLS,
     DB_PATH,
     DELAY,
-    DIMS,
     DIM_NAMES,
+    DIMS,
     SCALES,
+    _is_blend,
+    _is_decaf,
+    _matches_exclude,
     find_coffee,
     init_db,
     save_coffee,
     scrape_product,
-    _is_blend,
-    _is_decaf,
-    _matches_exclude,
 )
 
 logger = logging.getLogger(__name__)
@@ -1369,10 +1369,38 @@ def pairs(queries):
 
     ds = _dscale()
 
+    # ── Archetype analysis (shared across all pairs) ──
+    import numpy as np
+
+    pca = pca_reduce(all_vecs, variance_threshold=0.80)
+    scores_pca = np.array(pca["scores"])
+    components = np.array(pca["components"])
+    mean_pca = np.array(pca["mean"])
+
+    n_arch = _pick_n_archetypes(scores_pca)
+    if isinstance(n_arch, tuple):
+        n_arch = n_arch[0]
+    aa = archetypal_analysis(scores_pca, n_arch)
+    alpha_mat = np.array(aa["alpha"])
+    arch_22d = np.array(aa["archetypes"]) @ components + mean_pca
+
+    arch_names = []
+    for ai in range(n_arch):
+        arch_vec = arch_22d[ai]
+        diffs = [
+            (DIM_NAMES[j], (arch_vec[j] - mean_pca[j]) * ds[j]) for j in range(ndims)
+        ]
+        diffs.sort(key=lambda x: -abs(x[1]))
+        top_pos = [nm for nm, dv in diffs if dv > 0.3 * stddevs[0]][:2]
+        arch_names.append("/".join(top_pos) if top_pos else "Balanced")
+
+    # Build url→index map for alpha lookup.
+    url_to_idx = {c["url"]: idx for idx, c in enumerate(all_scored)}
+
     print(f"\n{'━' * 60}")
     print("  TASTING PAIRS — Contrast Assignments")
     print(f"  {n} coffees → {len(matching)} pairs")
-    print(f"{'━' * 60}\n")
+    print(f"{'━' * 60}")
 
     for pair_num, (i, j) in enumerate(matching, 1):
         a, b = coffees[i], coffees[j]
@@ -1382,63 +1410,118 @@ def pairs(queries):
         mutual = antipode_pick[i] == j and antipode_pick[j] == i
         method = "mutual antipode" if mutual else "antipode matching"
 
-        # Find the dimension with the largest absolute gap.
+        dist = weighted_distance(va, vb, url_a=a["url"], url_b=b["url"])
+
+        print(f"\n  {'═' * 56}")
+        print(f"  Pair {pair_num}  [{method}]  total dist: {dist:.3f}")
+        print(f"  {'═' * 56}")
+        print(f"    A: {a['name']}")
+        print(f"    B: {b['name']}")
+
+        # ── Full dimension comparison ──
+        # Compute all gaps sorted by magnitude.
         dim_gaps = []
         for d in range(ndims):
-            gap = (va[d] - vb[d]) * ds[d]
-            dim_gaps.append((abs(gap), gap, d))
+            val_a = va[d] * ds[d]
+            val_b = vb[d] * ds[d]
+            gap = val_a - val_b
+            dim_gaps.append((abs(gap), gap, d, val_a, val_b))
         dim_gaps.sort(key=lambda x: -x[0])
 
-        contrast_dim_idx = dim_gaps[0][2]
-        contrast_gap = dim_gaps[0][1]
-        contrast_name = DIM_NAMES[contrast_dim_idx]
-
-        # Determine HIGH and LOW.
-        if contrast_gap > 0:
-            high, low = a, b
-            high_val = va[contrast_dim_idx] * ds[contrast_dim_idx]
-            low_val = vb[contrast_dim_idx] * ds[contrast_dim_idx]
-        else:
-            high, low = b, a
-            high_val = vb[contrast_dim_idx] * ds[contrast_dim_idx]
-            low_val = va[contrast_dim_idx] * ds[contrast_dim_idx]
-
-        # Residual distance (all dims except contrast dim).
-        residual = (
-            sum((va[d] - vb[d]) ** 2 for d in range(ndims) if d != contrast_dim_idx)
-            ** 0.5
-        )
-
-        dist = weighted_distance(
-            va, vb, url_a=coffees[i]["url"], url_b=coffees[j]["url"]
-        )
-
-        print(f"  Pair {pair_num}: isolates {contrast_name}  [{method}]")
-        print(f"  {'─' * 50}")
-        print(f"    HIGH ({contrast_name}={high_val:.1f}): {high['name']}")
-        print(f"    LOW  ({contrast_name}={low_val:.1f}): {low['name']}")
-        print(
-            f"    Gap: {abs(contrast_gap):.2f}  |  Residual dist: {residual:.3f}  |  Total dist: {dist:.3f}"
-        )
-
-        # Show secondary differences if any are notable.
-        secondary = [
-            (DIM_NAMES[d], gap * (1 if contrast_gap > 0 else -1))
-            for _, gap, d in dim_gaps[1:4]
-            if dim_gaps[0][0] > 0 and abs(gap) > 0.3 * stddevs[d] * ds[d]
+        # Split into: notable differences vs shared strengths.
+        notable_threshold = 0.2 * stddevs[0] * ds[0] if ds[0] != 1 else 0.3
+        differences = [
+            (g, d, va_d, vb_d)
+            for abs_g, g, d, va_d, vb_d in dim_gaps
+            if abs_g > notable_threshold
         ]
-        if secondary:
-            sec_str = ", ".join(
-                f"{n} {'↑' if g > 0 else '↓'}{abs(g):.1f}" for n, g in secondary
-            )
-            print(f"    Also differs: {sec_str}")
-        print()
+        shared = [
+            (d, va_d, vb_d)
+            for abs_g, g, d, va_d, vb_d in dim_gaps
+            if abs_g <= notable_threshold and min(va_d, vb_d) > 0.3
+        ]
+
+        if differences:
+            print("\n    ── Dimension Differences (A vs B) ──")
+            # Header
+            max_name_len = max(len(DIM_NAMES[d]) for _, _, d, _, _ in dim_gaps)
+            for gap, d, val_a, val_b in differences:
+                name = DIM_NAMES[d]
+                # Arrow showing direction: A > B means ← (A wins), A < B means → (B wins)
+                if gap > 0:
+                    indicator = f"A +{abs(gap):.2f}"
+                else:
+                    indicator = f"B +{abs(gap):.2f}"
+                print(
+                    f"      {name:<{max_name_len}}  "
+                    f"{val_a:5.2f}  vs  {val_b:5.2f}  ({indicator})"
+                )
+
+        if shared:
+            print("\n    ── Shared Strengths ──")
+            shared_strs = []
+            for d, va_d, vb_d in sorted(shared, key=lambda x: -min(x[1], x[2])):
+                avg = (va_d + vb_d) / 2
+                shared_strs.append(f"{DIM_NAMES[d]}={avg:.1f}")
+            print(f"      {', '.join(shared_strs)}")
+
+        # ── Archetype decomposition for each ──
+        def _get_alpha(coffee_row, vec):
+            idx = url_to_idx.get(coffee_row["url"])
+            if idx is not None:
+                return alpha_mat[idx]
+            coffee_pca = (np.array(vec) - mean_pca) @ components.T
+            dists_to = np.linalg.norm(scores_pca - coffee_pca, axis=1)
+            return alpha_mat[int(np.argmin(dists_to))]
+
+        alpha_a = _get_alpha(a, va)
+        alpha_b = _get_alpha(b, vb)
+
+        parts_a = sorted(
+            [(arch_names[k], alpha_a[k]) for k in range(n_arch)],
+            key=lambda x: -x[1],
+        )
+        parts_b = sorted(
+            [(arch_names[k], alpha_b[k]) for k in range(n_arch)],
+            key=lambda x: -x[1],
+        )
+        str_a = " + ".join(f"{nm} {w:.0%}" for nm, w in parts_a if w > 0.05)
+        str_b = " + ".join(f"{nm} {w:.0%}" for nm, w in parts_b if w > 0.05)
+
+        print("\n    ── Archetype Decomposition ──")
+        print(f"      A: {str_a}")
+        print(f"      B: {str_b}")
+
+        # ── Tasting guidance ──
+        # Top 3 dimensions to pay attention to (largest gaps).
+        top_contrast_dims = [
+            (DIM_NAMES[d], gap)
+            for _, gap, d, _, _ in dim_gaps[:3]
+            if abs(dim_gaps[0][0]) > 0
+        ]
+        if top_contrast_dims:
+            print("\n    ── Tasting Focus ──")
+            focus_parts = []
+            for name, gap in top_contrast_dims:
+                if gap > 0:
+                    focus_parts.append(f"{name} (A higher)")
+                else:
+                    focus_parts.append(f"{name} (B higher)")
+            print(f"      Pay attention to: {', '.join(focus_parts)}")
+            if shared:
+                common_note = ", ".join(
+                    DIM_NAMES[d]
+                    for d, va_d, vb_d in sorted(shared, key=lambda x: -min(x[1], x[2]))[
+                        :3
+                    ]
+                )
+                print(f"      Common ground: {common_note}")
 
     if leftover:
-        print(f"  ⚠ Unpaired (odd count): {leftover['name']}")
+        print(f"\n  ⚠ Unpaired (odd count): {leftover['name']}")
         print(f"    {leftover['url']}")
-        print()
 
+    print()
     conn.close()
 
 
@@ -2450,10 +2533,10 @@ def flavor_map_slider(
     """
     import json
     import re
+    import warnings
 
     import numpy as np
     import umap
-    import warnings
 
     warnings.filterwarnings("ignore", message="n_jobs value.*overridden.*random_state")
 
@@ -3527,9 +3610,9 @@ def flavor_map(
     """
     import warnings
 
+    import matplotlib
     import numpy as np
     import umap
-    import matplotlib
 
     warnings.filterwarnings("ignore", message="n_jobs value.*overridden.*random_state")
 
@@ -4026,8 +4109,9 @@ def html_report(
     n_steps=11,
 ):
     """Generate a full interactive HTML report of the catalog flavor space."""
-    import numpy as np
     from datetime import date as _date
+
+    import numpy as np
 
     from report_html import generate_report_html
 
@@ -4289,10 +4373,34 @@ def html_report(
     import re
 
     _stop = {
-        "this", "that", "with", "from", "have", "been", "will", "also",
-        "very", "more", "some", "than", "into", "when", "which", "there",
-        "their", "about", "would", "could", "other", "after", "coffee",
-        "roast", "notes", "hint", "cups", "like",
+        "this",
+        "that",
+        "with",
+        "from",
+        "have",
+        "been",
+        "will",
+        "also",
+        "very",
+        "more",
+        "some",
+        "than",
+        "into",
+        "when",
+        "which",
+        "there",
+        "their",
+        "about",
+        "would",
+        "could",
+        "other",
+        "after",
+        "coffee",
+        "roast",
+        "notes",
+        "hint",
+        "cups",
+        "like",
     }
     notes_by_url = {}
     for row in conn.execute(
