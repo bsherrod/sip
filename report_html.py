@@ -195,9 +195,33 @@ table.data-table tr:hover {{ background: #1f2f50; }}
   <div id="chart-umap" class="chart chart-tall"></div>
 </div>
 
-<!-- Section 2: Archetype Profiles -->
+<!-- Section 2: PCA Biplot -->
 <div class="section">
-  <h2>2. Archetype Profiles</h2>
+  <h2>2. PCA Biplot</h2>
+  <p class="desc">Principal component scatter with dimension loading arrows. Each dot is a coffee positioned by its PCA scores; arrows show which flavor dimensions drive each axis. Longer arrows = stronger contribution.</p>
+  <div class="controls">
+    <label>Axes:</label>
+    <div class="toggle-group">
+      <input type="radio" name="biplot-axes" id="bp-12" value="0,1" checked>
+      <label for="bp-12">PC1 vs PC2</label>
+      <input type="radio" name="biplot-axes" id="bp-13" value="0,2">
+      <label for="bp-13">PC1 vs PC3</label>
+      <input type="radio" name="biplot-axes" id="bp-23" value="1,2">
+      <label for="bp-23">PC2 vs PC3</label>
+    </div>
+    <label>Arrows:</label>
+    <select id="biplot-arrow-count">
+      <option value="8">Top 8</option>
+      <option value="12" selected>Top 12</option>
+      <option value="22">All 22</option>
+    </select>
+  </div>
+  <div id="chart-biplot" class="chart chart-tall"></div>
+</div>
+
+<!-- Section 3: Archetype Profiles -->
+<div class="section">
+  <h2>3. Archetype Profiles</h2>
   <p class="desc">Radar charts showing each archetype's deviation from the population mean. Cupping dimensions (left) and flavor intensity (right).</p>
   <div class="charts-row">
     <div id="chart-arch-cupping" class="chart" style="height:500px"></div>
@@ -205,9 +229,9 @@ table.data-table tr:hover {{ background: #1f2f50; }}
   </div>
 </div>
 
-<!-- Section 3: Catalog Composition -->
+<!-- Section 4: Catalog Composition -->
 <div class="section">
-  <h2>3. Catalog Composition</h2>
+  <h2>4. Catalog Composition</h2>
   <p class="desc">Distribution of coffees by different groupings.</p>
   <div class="controls">
     <div class="toggle-group">
@@ -222,16 +246,16 @@ table.data-table tr:hover {{ background: #1f2f50; }}
   <div id="chart-composition" class="chart chart-short"></div>
 </div>
 
-<!-- Section 4: Dimension Correlations -->
+<!-- Section 5: Dimension Correlations -->
 <div class="section">
-  <h2>4. Dimension Correlations</h2>
+  <h2>5. Dimension Correlations</h2>
   <p class="desc">Pearson correlations between all 22 flavor dimensions. Red = trade-off, blue = move together.</p>
   <div id="chart-correlations" class="chart chart-tall"></div>
 </div>
 
-<!-- Section 5: Dimension Distributions -->
+<!-- Section 6: Dimension Distributions -->
 <div class="section">
-  <h2>5. Dimension Distributions</h2>
+  <h2>6. Dimension Distributions</h2>
   <p class="desc">Box plots showing the spread of each dimension. Cupping scores (0&ndash;10) on the left, flavor intensity (0&ndash;5) on the right.</p>
   <div class="controls">
     <div class="toggle-group">
@@ -247,9 +271,9 @@ table.data-table tr:hover {{ background: #1f2f50; }}
   </div>
 </div>
 
-<!-- Section 6: PCA Factors -->
+<!-- Section 7: PCA Factors -->
 <div class="section">
-  <h2>6. PCA Factor Analysis</h2>
+  <h2>7. PCA Factor Analysis</h2>
   <p class="desc">Variance explained per principal component and the dimension loadings that define each factor.</p>
   <div id="chart-pca-var" class="chart chart-short"></div>
   <div id="chart-pca-loadings" class="chart chart-tall"></div>
@@ -261,9 +285,9 @@ table.data-table tr:hover {{ background: #1f2f50; }}
   </div>
 </div>
 
-<!-- Section 7: Processing Method Signatures -->
+<!-- Section 8: Processing Method Signatures -->
 <div class="section">
-  <h2>7. Processing Method Signatures</h2>
+  <h2>8. Processing Method Signatures</h2>
   <p class="desc">Average dimension profiles by processing method. Cupping (left) and flavor intensity (right).</p>
   <div class="charts-row">
     <div id="chart-proc-cupping" class="chart" style="height:500px"></div>
@@ -271,16 +295,16 @@ table.data-table tr:hover {{ background: #1f2f50; }}
   </div>
 </div>
 
-<!-- Section 8: Dimension Contrast Pairs -->
+<!-- Section 9: Dimension Contrast Pairs -->
 <div class="section">
-  <h2>8. Dimension Contrast Pairs</h2>
+  <h2>9. Dimension Contrast Pairs</h2>
   <p class="desc">For each dimension, the high/low pair of coffees that are otherwise most similar &mdash; ideal for isolating a single taste characteristic.</p>
   <div id="chart-explore" class="chart chart-tall"></div>
 </div>
 
-<!-- Section 9: Superlatives & Outliers -->
+<!-- Section 10: Superlatives & Outliers -->
 <div class="section">
-  <h2>9. Superlatives &amp; Outliers</h2>
+  <h2>10. Superlatives &amp; Outliers</h2>
   <p class="desc">Extremes of the catalog: highest per dimension, most unusual, most typical.</p>
   <table class="data-table" id="table-superlatives">
     <thead><tr><th>Category</th><th>Coffee</th><th>Value</th></tr></thead>
@@ -423,7 +447,180 @@ function initChart(id) {{
   window.addEventListener('resize', function() {{ chart.resize(); }});
 }})();
 
-// --- Section 2: Archetype Radars (split cupping/flavor) ---
+// --- Section 2: PCA Biplot ---
+(function() {{
+  const chart = initChart('chart-biplot');
+  const scores = D.biplot_scores;
+  const loadings = D.pca_loadings;
+  const variance = D.pca_variance;
+  const dims = D.dim_names;
+  const coffees = D.coffees;
+  const archNames = D.archetype_names;
+  const archColors = D.archetype_colors;
+  const nPca = D.pca_n_kept;
+
+  // Use first UMAP frame's dominant archetype for coloring
+  const dominant = D.umap_frames[0].dominant;
+
+  let pcX = 0, pcY = 1;
+  let arrowCount = 12;
+
+  function renderBiplot() {{
+    const instockOnly = (typeof window._globalStock !== 'undefined') && window._globalStock === 'instock';
+
+    // --- Coffee scatter series (one per archetype) ---
+    const series = [];
+    for (let ai = 0; ai < archNames.length; ai++) {{
+      const pts = [];
+      for (let i = 0; i < coffees.length; i++) {{
+        if (dominant[i] !== ai) continue;
+        if (instockOnly && !coffees[i].in_stock) continue;
+        if (!scores[i] || scores[i].length <= Math.max(pcX, pcY)) continue;
+        pts.push([scores[i][pcX], scores[i][pcY], coffees[i].name, coffees[i].in_stock, coffees[i].score, coffees[i].url, i]);
+      }}
+      series.push({{
+        name: archNames[ai],
+        type: 'scatter',
+        data: pts,
+        symbolSize: function(d) {{ return d[3] ? 7 : 4; }},
+        itemStyle: {{ color: archColors[ai], opacity: function(d) {{ return d[3] ? 0.8 : 0.3; }} }},
+        z: 2
+      }});
+    }}
+
+    // --- Loading arrows ---
+    // Compute arrow lengths to select top N
+    const arrowLengths = loadings[pcX].map(function(_, di) {{
+      const lx = loadings[pcX][di];
+      const ly = loadings[pcY][di];
+      return Math.sqrt(lx * lx + ly * ly);
+    }});
+
+    // Sort indices by length, take top arrowCount
+    const sortedIndices = arrowLengths.map(function(_, i) {{ return i; }});
+    sortedIndices.sort(function(a, b) {{ return arrowLengths[b] - arrowLengths[a]; }});
+    const showIndices = sortedIndices.slice(0, arrowCount);
+
+    // Scale arrows to fit nicely relative to the scores spread
+    const allX = scores.filter(function(s) {{ return s && s.length > pcX; }}).map(function(s) {{ return s[pcX]; }});
+    const allY = scores.filter(function(s) {{ return s && s.length > pcY; }}).map(function(s) {{ return s[pcY]; }});
+    const rangeX = Math.max(Math.abs(Math.min.apply(null, allX)), Math.abs(Math.max.apply(null, allX)));
+    const rangeY = Math.max(Math.abs(Math.min.apply(null, allY)), Math.abs(Math.max.apply(null, allY)));
+    const maxRange = Math.max(rangeX, rangeY) || 1;
+    const maxLoad = Math.max.apply(null, showIndices.map(function(i) {{ return arrowLengths[i]; }})) || 1;
+    const arrowScale = maxRange * 0.75 / maxLoad;
+
+    // Arrow lines (from origin to tip)
+    const arrowData = [];
+    const labelData = [];
+    for (let k = 0; k < showIndices.length; k++) {{
+      const di = showIndices[k];
+      const tipX = loadings[pcX][di] * arrowScale;
+      const tipY = loadings[pcY][di] * arrowScale;
+      arrowData.push([{{ coord: [0, 0] }}, {{ coord: [tipX, tipY] }}]);
+      labelData.push([tipX * 1.08, tipY * 1.08, dims[di]]);
+    }}
+
+    series.push({{
+      name: 'Loadings',
+      type: 'lines',
+      coordinateSystem: 'cartesian2d',
+      data: arrowData,
+      lineStyle: {{ color: '#e94560', width: 1.8, opacity: 0.7 }},
+      effect: {{ show: false }},
+      symbol: ['none', 'arrow'],
+      symbolSize: [0, 8],
+      z: 10
+    }});
+
+    // Arrow tip labels
+    series.push({{
+      name: 'Dim Labels',
+      type: 'scatter',
+      data: labelData,
+      symbol: 'none',
+      symbolSize: 0,
+      label: {{
+        show: true,
+        formatter: function(p) {{ return p.data[2]; }},
+        position: 'right',
+        color: '#e94560',
+        fontSize: 10,
+        fontWeight: 'bold'
+      }},
+      tooltip: {{ show: false }},
+      z: 11
+    }});
+
+    // Origin crosshair
+    const axisExtent = maxRange * 1.1;
+
+    chart.setOption({{
+      tooltip: {{
+        trigger: 'item',
+        formatter: function(p) {{
+          if (!p.data || !Array.isArray(p.data) || p.data.length < 6) return null;
+          const d = p.data;
+          const stock = d[3] ? '\\u2705 In Stock' : '\\u274c Out of Stock';
+          const ci = d[6];
+          const archLabel = (ci != null && dominant[ci] != null) ? archNames[dominant[ci]] : '';
+          return '<b>' + d[2] + '</b><br>Score: ' + d[4] + ' &nbsp; ' + stock
+            + (archLabel ? '<br>Archetype: ' + archLabel : '')
+            + '<br>PC' + (pcX+1) + ': ' + d[0].toFixed(2) + ' &nbsp; PC' + (pcY+1) + ': ' + d[1].toFixed(2)
+            + '<br><span style="color:#666;font-size:10px">Click to open on Sweet Maria\\u2019s</span>';
+        }}
+      }},
+      legend: {{ type: 'plain', top: 5, left: 'center', textStyle: {{ color: '#ccc', fontSize: 11 }}, itemGap: 15 }},
+      xAxis: {{
+        type: 'value',
+        name: 'PC' + (pcX+1) + ' (' + (variance[pcX]*100).toFixed(1) + '%)',
+        nameLocation: 'middle',
+        nameGap: 25,
+        nameTextStyle: {{ color: '#aaa', fontSize: 11 }},
+        axisLabel: {{ color: '#999', fontSize: 9 }},
+        splitLine: {{ lineStyle: {{ color: '#2a2a4a' }} }},
+        axisLine: {{ lineStyle: {{ color: '#444' }} }}
+      }},
+      yAxis: {{
+        type: 'value',
+        name: 'PC' + (pcY+1) + ' (' + (variance[pcY]*100).toFixed(1) + '%)',
+        nameLocation: 'middle',
+        nameGap: 35,
+        nameTextStyle: {{ color: '#aaa', fontSize: 11 }},
+        axisLabel: {{ color: '#999', fontSize: 9 }},
+        splitLine: {{ lineStyle: {{ color: '#2a2a4a' }} }},
+        axisLine: {{ lineStyle: {{ color: '#444' }} }}
+      }},
+      series: series,
+      animationDuration: 300
+    }}, true);
+  }}
+
+  renderBiplot();
+  window._renderBiplot = renderBiplot;
+
+  chart.on('click', function(p) {{
+    if (p.data && Array.isArray(p.data) && p.data[5]) {{
+      window.open(p.data[5], '_blank');
+    }}
+  }});
+
+  document.querySelectorAll('input[name="biplot-axes"]').forEach(function(r) {{
+    r.addEventListener('change', function() {{
+      const parts = this.value.split(',');
+      pcX = parseInt(parts[0]);
+      pcY = parseInt(parts[1]);
+      renderBiplot();
+    }});
+  }});
+  document.getElementById('biplot-arrow-count').addEventListener('change', function() {{
+    arrowCount = parseInt(this.value);
+    renderBiplot();
+  }});
+  window.addEventListener('resize', function() {{ chart.resize(); }});
+}})();
+
+// --- Section 3: Archetype Radars (split cupping/flavor) ---
 (function() {{
   const chartCup = initChart('chart-arch-cupping');
   const chartFlav = initChart('chart-arch-flavor');
@@ -464,7 +661,7 @@ function initChart(id) {{
   window.addEventListener('resize', function() {{ chartCup.resize(); chartFlav.resize(); }});
 }})();
 
-// --- Section 3: Catalog Composition ---
+// --- Section 4: Catalog Composition ---
 (function() {{
   const chart = initChart('chart-composition');
   const pieColors = ['#e94560','#4dc9f6','#50fa7b','#ffb86c','#bd93f9','#ff79c6','#8be9fd','#f1fa8c','#6272a4','#44475a','#282a36','#f8f8f2'];
@@ -504,7 +701,7 @@ function initChart(id) {{
   window.addEventListener('resize', function() {{ chart.resize(); }});
 }})();
 
-// --- Section 4: Correlations Heatmap ---
+// --- Section 5: Correlations Heatmap ---
 (function() {{
   const chart = initChart('chart-correlations');
   const dims = D.dim_names;
@@ -540,7 +737,7 @@ function initChart(id) {{
   window.addEventListener('resize', function() {{ chart.resize(); }});
 }})();
 
-// --- Section 5: Box Plots (split cupping 0-10 / flavor 0-5) ---
+// --- Section 6: Box Plots (split cupping 0-10 / flavor 0-5) ---
 (function() {{
   const chartCup = initChart('chart-dist-cupping');
   const chartFlav = initChart('chart-dist-flavor');
@@ -622,7 +819,7 @@ function initChart(id) {{
   window.addEventListener('resize', function() {{ chartCup.resize(); chartFlav.resize(); }});
 }})();
 
-// --- Section 6: PCA ---
+// --- Section 7: PCA ---
 (function() {{
   const chartVar = initChart('chart-pca-var');
   const chartLoad = initChart('chart-pca-loadings');
@@ -667,7 +864,7 @@ function initChart(id) {{
   window.addEventListener('resize', function() {{ chartVar.resize(); chartLoad.resize(); }});
 }})();
 
-// --- Section 6b: PCA Signatures Radar ---
+// --- Section 7b: PCA Signatures Radar ---
 (function() {{
   const chartCup = initChart('chart-pca-radar-cupping');
   const chartFlav = initChart('chart-pca-radar-flavor');
@@ -742,7 +939,7 @@ function initChart(id) {{
   window.addEventListener('resize', function() {{ chartCup.resize(); chartFlav.resize(); }});
 }})();
 
-// --- Section 7: Processing Methods ---
+// --- Section 8: Processing Methods ---
 (function() {{
   const chartCup = initChart('chart-proc-cupping');
   const chartFlav = initChart('chart-proc-flavor');
@@ -792,7 +989,7 @@ function initChart(id) {{
   window.addEventListener('resize', function() {{ chartCup.resize(); chartFlav.resize(); }});
 }})();
 
-// --- Section 8: Explore (Dimension Contrast Pairs) ---
+// --- Section 9: Explore (Dimension Contrast Pairs) ---
 (function() {{
   const chart = initChart('chart-explore');
   const pairsInstock = D.explore_pairs;
@@ -845,7 +1042,7 @@ function initChart(id) {{
   window.addEventListener('resize', function() {{ chart.resize(); }});
 }})();
 
-// --- Section 9: Superlatives Table ---
+// --- Section 10: Superlatives Table ---
 (function() {{
   const tbody = document.getElementById('superlatives-body');
 
@@ -892,6 +1089,7 @@ function initChart(id) {{
         : D.n_coffees + ' coffees';
       // Refresh all affected sections
       if (window._renderUmap) window._renderUmap();
+      if (window._renderBiplot) window._renderBiplot();
       if (window._renderComposition) window._renderComposition();
       if (window._renderBoxPlots) window._renderBoxPlots();
       if (window._renderExplore) window._renderExplore();

@@ -4712,6 +4712,10 @@ def html_report(
         "pca_variance": pca_variance,
         "pca_loadings": pca_loadings,
         "pca_n_kept": n_pca,
+        "biplot_scores": [
+            [round(float(scores[i, c]), 4) for c in range(min(n_pca, 5))]
+            for i in range(n_coffees)
+        ],
         "processing_methods": processing_methods,
         "explore_pairs": explore_pairs,
         "explore_pairs_all": explore_pairs_all,
