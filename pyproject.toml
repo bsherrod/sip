@@ -1,0 +1,56 @@
+[project]
+name = "sip"
+version = "0.1.0"
+description = "Sweet Maria's Inventory Picker - explore and select green coffee by flavor profile"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Bruce Sherrod" }]
+keywords = ["coffee", "flavor", "embeddings", "umap", "cli"]
+
+# Direct imports only. Every one of these is imported somewhere in the four
+# modules; transitive dependencies are resolved by the installer and recorded in
+# uv.lock.
+#
+# numpy, scipy, scikit-learn and matplotlib used to be undeclared: the first
+# three happened to arrive as transitive dependencies of sentence-transformers
+# and umap-learn, and matplotlib did not arrive at all, which is why
+# `coffee.py html` failed on a correct install.
+dependencies = [
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+    "scipy>=1.11",
+    "sentence-transformers>=2.2",
+    "spacy>=3.7",
+    # 0.6 is the floor because coffee.py passes compatibility_layout, which
+    # earlier releases do not accept.
+    "umap-learn>=0.6",
+    # spaCy models are not on PyPI, so this is a direct reference to the release
+    # wheel. Declaring it here rather than asking people to run
+    # `python -m spacy download en_core_web_sm` is not just convenience: that
+    # installs outside the lock, and `uv sync` then uninstalls it again.
+    #
+    # The model version must track the spacy minor version (3.8.x spacy wants a
+    # 3.8.x model), so bump both together.
+    "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+]
+
+[project.urls]
+Homepage = "https://github.com/bsherrod/sip"
+Repository = "https://github.com/bsherrod/sip"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# The modules live at the repo root rather than in a package directory, so they
+# have to be listed explicitly: setuptools does not infer a flat layout, and
+# without this an install would succeed while installing no importable code.
+#
+# Note for anyone installing rather than working from a checkout: scrape_sm.py
+# resolves the database as Path(__file__).parent / "coffees.db", so a
+# non-editable `pip install .` would place it inside site-packages. Use
+# `pip install -e .`, which keeps __file__ in the checkout.
+[tool.setuptools]
+py-modules = ["coffee", "embed", "report_html", "scrape_sm"]

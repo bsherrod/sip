@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
 """Sweet Maria's Green Coffee Scraper — uses Shopify JSON API + plain HTTP.
 
 Extracts: name, price, stock, total score, cupping dimension scores,

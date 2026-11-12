@@ -32,23 +32,47 @@ navigate the flavor space to help you decide what to buy.
 
 ## Quick start
 
+Needs Python 3.11 or newer. Dependencies are declared in `pyproject.toml`.
+
+### With [uv](https://docs.astral.sh/uv/) (nothing to install by hand)
+
+The scripts carry a `#!/usr/bin/env -S uv run` shebang, so uv creates the
+virtualenv and installs dependencies on first run, from anywhere:
+
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-python -m spacy download en_core_web_sm
+./scrape_sm.py                  # scrape the current catalog
+./coffee.py recommend
+```
 
-# Scrape the current catalog
+The first run has to download the dependency set, and `sentence-transformers`
+pulls in PyTorch, so expect it to take a while. Later runs add roughly a tenth of
+a second of overhead.
+
+### Without uv
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
 python scrape_sm.py
-
-# Get recommendations
 python coffee.py recommend
+```
 
-# Compare a specific coffee
-python coffee.py compare "ethiopia natural"
+Use `pip install -e .`, not `pip install .`. The database path is resolved
+relative to the source file, so a non-editable install would try to keep
+`coffees.db` inside `site-packages`.
 
-# Generate interactive HTML report
-python coffee.py html                         # full report with all visualizations
-python coffee.py html --slider-steps 11       # fewer UMAP frames (faster)
+The spaCy `en_core_web_sm` model installs automatically with everything else —
+it is declared in `pyproject.toml` as a direct reference to its release wheel,
+so there is no separate `python -m spacy download` step. If you ever bump the
+spaCy minor version, bump the model URL to match.
+
+### Then
+
+```bash
+./coffee.py compare "ethiopia natural"    # profile a specific coffee
+./coffee.py html                          # full interactive report
+./coffee.py html --slider-steps 11        # fewer UMAP frames (faster)
 ```
 
 ## Commands
@@ -89,9 +113,9 @@ Once built, embeddings unlock two features:
 
 ## Database
 
-The scraper populates a local SQLite database (`coffees.db`). This file is
-gitignored — run `scrape_sm.py` to build your own fresh copy from the current
-catalog.
+The scraper populates a local SQLite database (`coffees.db`), kept next to the
+source files. This file is gitignored — run `scrape_sm.py` to build your own
+fresh copy from the current catalog.
 
 ## License
 

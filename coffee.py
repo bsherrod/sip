@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
 """Coffee flavor space analysis — recommendations, clustering, exploration.
 
 Uses the database populated by scrape_sm.py. Run with --help for usage.
@@ -29,6 +29,29 @@ from scrape_sm import (
     save_coffee,
     scrape_product,
 )
+
+# umap-learn 0.6 can use either its legacy (0.5.x) layout pipeline or a newer
+# one: recursive initialisation plus the Adam optimiser, selected by
+# compatibility_layout. They produce different embeddings from the same seed, so
+# this is set explicitly rather than left to a default that is due to flip.
+#
+# False (the new pipeline) was chosen on measurements against this catalogue
+# (566 coffees x 10 cupping dimensions):
+#
+#   metric                          legacy    new
+#   fit time                         3.12s    0.16s
+#   trustworthiness (local, k=15)   0.9764   0.9751
+#   global distance correlation      0.527    0.732   (3 seeds, +/-0.01)
+#   slider loop, 5 warm-started frames
+#     time                           1.90s    0.78s
+#     mean frame disparity           0.277    0.205
+#
+# The global number is the deciding one: the 2-D map reflects real flavour
+# distances markedly better, which is what the report is read for. Local
+# fidelity is a wash and everything else improves. Set True only to reproduce
+# maps generated before 2026-11, since the layout is not comparable across this
+# setting.
+UMAP_COMPATIBILITY_LAYOUT = False
 
 logger = logging.getLogger(__name__)
 
@@ -2626,6 +2649,7 @@ def flavor_map_slider(
             n_components=2,
             metric="precomputed",
             random_state=42,
+            compatibility_layout=UMAP_COMPATIBILITY_LAYOUT,
         )
         embedding = reducer.fit_transform(dist_matrix)
         frames.append(embedding)
@@ -3755,6 +3779,7 @@ def flavor_map(
             n_components=2,
             metric="precomputed",
             random_state=42,
+            compatibility_layout=UMAP_COMPATIBILITY_LAYOUT,
         )
         embedding = reducer.fit_transform(dist_matrix)
         umap_desc = f"UMAP(blended, text_weight={text_weight:.1f})"
@@ -3771,6 +3796,7 @@ def flavor_map(
             n_components=2,
             metric="euclidean",
             random_state=42,
+            compatibility_layout=UMAP_COMPATIBILITY_LAYOUT,
         )
         embedding = reducer.fit_transform(combined)
         umap_desc = f"UMAP(concat, {n_pca}D numeric + {n_text_components}D text → 2D)"
@@ -3788,6 +3814,7 @@ def flavor_map(
             n_components=2,
             metric="euclidean",
             random_state=42,
+            compatibility_layout=UMAP_COMPATIBILITY_LAYOUT,
         )
         embedding = reducer.fit_transform(scores)
         umap_desc = f"UMAP({n_pca}D PCA → 2D)"
@@ -4287,6 +4314,7 @@ def html_report(
             min_dist=min_dist,
             n_components=2,
             random_state=42,
+            compatibility_layout=UMAP_COMPATIBILITY_LAYOUT,
             init=init_param,
         )
         embedding = reducer.fit_transform(combined)

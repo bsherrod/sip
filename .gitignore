@@ -2,3 +2,8 @@ coffees.db
 __pycache__/
 *.pyc
 .ruff_cache/
+.venv/
+build/
+dist/
+*.egg-info/
+uv.lock

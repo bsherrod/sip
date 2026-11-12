@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
 """Compute and manage sentence embeddings for coffee cupping notes.
 
 Embeds cupping_notes text from the coffees database using sentence-transformers,
